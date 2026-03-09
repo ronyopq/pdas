@@ -2,10 +2,17 @@
 
 import type {
   ApiResponse,
+  DailyActivityRow,
+  DailyActivityRowInput,
+  DailyActivityStatus,
+  DailySheet,
   DashboardPayload,
   LoginInput,
   MonthlyWorkPlan,
   NavigationItem,
+  PendingActionInput,
+  PendingItem,
+  TaskLinkOption,
   TravelPlanRow,
   TravelPlanRowInput,
   UserRole,
@@ -43,6 +50,7 @@ interface PlanRowRecord {
   expected_output: string | null;
   row_type: WorkPlanRow["rowType"];
   row_status: WorkPlanRow["rowStatus"];
+  remarks?: string | null;
 }
 
 interface TravelRowRecord {
@@ -53,6 +61,34 @@ interface TravelRowRecord {
   purpose: string | null;
   expected_output: string | null;
   status: TravelPlanRow["status"];
+}
+
+interface DailySheetRecord {
+  id: string;
+  user_id: string;
+  work_date: string;
+  status: DailySheet["status"];
+  note: string | null;
+}
+
+interface DailyRowRecord {
+  id: string;
+  line_no: number;
+  linked_plan_row_id: string | null;
+  linked_travel_row_id: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  actual_activity: string;
+  actual_output: string | null;
+  status: DailyActivityRow["status"];
+  delivery_required: number;
+  delivery_done: number;
+  is_ad_hoc: number;
+  ad_hoc_reason: string | null;
+  carry_forward_action: DailyActivityRow["carryForwardAction"];
+  row_note: string | null;
+  plan_activity: string | null;
+  travel_destination: string | null;
 }
 
 const SESSION_COOKIE = "praan_session";
@@ -154,6 +190,26 @@ function clearSessionHeader(): HeadersInit {
   };
 }
 
+function currentDateInTimeZone(timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const year = parts.find((part) => part.type === "year")?.value ?? "2026";
+  const month = parts.find((part) => part.type === "month")?.value ?? "03";
+  const day = parts.find((part) => part.type === "day")?.value ?? "09";
+
+  return `${year}-${month}-${day}`;
+}
+
+function monthYearFromDate(workDate: string) {
+  const [year, month] = workDate.split("-").map(Number);
+  return { month, year };
+}
+
 async function persistSession(env: Env, token: string, userId: string) {
   memorySessions.set(token, userId);
 
@@ -251,6 +307,12 @@ function seededRows(): WorkPlanRowInput[] {
       rowType: "regular_work",
     },
     {
+      workDate: "2026-03-09",
+      activity: "KHANI Women's Day event preparation and blog post",
+      expectedOutput: "KHANI event plan finalized",
+      rowType: "regular_work",
+    },
+    {
       workDate: "2026-03-12",
       activity: "Follow-up meeting with developer for KHANI website update",
       expectedOutput: "Website update plan discussed",
@@ -280,6 +342,38 @@ function seededTravelRows(): TravelPlanRowInput[] {
       expectedOutput: "Photos and social post assets",
     },
   ];
+}
+
+function mapDailyStatusToPlanStatus(status: DailyActivityStatus): WorkPlanRow["rowStatus"] {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "in_progress":
+      return "in_progress";
+    case "deferred":
+      return "pending";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "planned";
+  }
+}
+
+function mapStatusesToPlanStatus(statuses: DailyActivityStatus[]): WorkPlanRow["rowStatus"] {
+  if (statuses.includes("completed")) return "completed";
+  if (statuses.includes("in_progress")) return "in_progress";
+  if (statuses.includes("deferred")) return "pending";
+  if (statuses.includes("cancelled")) return "cancelled";
+  return "planned";
+}
+
+function mapStatusesToTravelStatus(statuses: DailyActivityStatus[]): TravelPlanRow["status"] {
+  if (statuses.includes("completed")) return "completed";
+  if (statuses.includes("cancelled")) return "cancelled";
+  if (statuses.includes("in_progress") || statuses.includes("deferred") || statuses.includes("not_started")) {
+    return "pending";
+  }
+  return "planned";
 }
 
 function matchRoute(pathname: string, pattern: RegExp) {
@@ -378,6 +472,29 @@ async function findPlanRecordById(env: Env, planId: string, userId: string) {
     .first<PlanRecord>();
 }
 
+async function syncOverdueStatuses(env: Env, planId: string, workDate: string) {
+  await env.DB.batch([
+    env.DB.prepare(
+      `
+        UPDATE monthly_work_plan_rows
+        SET row_status = 'overdue', updated_at = CURRENT_TIMESTAMP
+        WHERE work_plan_id = ?
+          AND work_date < ?
+          AND row_status IN ('planned', 'in_progress', 'pending')
+      `,
+    ).bind(planId, workDate),
+    env.DB.prepare(
+      `
+        UPDATE monthly_travel_plan_rows
+        SET status = 'overdue', updated_at = CURRENT_TIMESTAMP
+        WHERE work_plan_id = ?
+          AND travel_date < ?
+          AND status IN ('planned', 'pending')
+      `,
+    ).bind(planId, workDate),
+  ]);
+}
+
 async function createSeedPlan(env: Env, user: UserSession, month: number, year: number) {
   const planId = crypto.randomUUID();
   const preparedDate = `${year}-${String(month).padStart(2, "0")}-01`;
@@ -407,7 +524,7 @@ async function createSeedPlan(env: Env, user: UserSession, month: number, year: 
         row.rowType,
         row.activity,
         row.expectedOutput,
-        index === 3 ? "pending" : "planned",
+        row.workDate < "2026-03-09" ? "pending" : "planned",
       ),
     );
   });
@@ -445,15 +562,22 @@ async function createSeedPlan(env: Env, user: UserSession, month: number, year: 
 
 async function ensurePlan(env: Env, user: UserSession, month: number, year: number) {
   const existing = await findPlanRecord(env, user.id, month, year);
+  const referenceDate = currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+
   if (existing) {
+    await syncOverdueStatuses(env, existing.id, referenceDate);
     return hydratePlan(env, existing, user);
   }
 
-  return createSeedPlan(env, user, month, year);
+  const plan = await createSeedPlan(env, user, month, year);
+  await syncOverdueStatuses(env, plan.id, referenceDate);
+  return plan;
 }
 
 async function summarizeDashboard(env: Env, user: UserSession): Promise<DashboardPayload> {
-  const plan = await ensurePlan(env, user, 3, 2026);
+  const today = currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+  const { month, year } = monthYearFromDate(today);
+  const plan = await ensurePlan(env, user, month, year);
   const pendingRows = plan.rows.filter((row) => row.rowStatus === "pending" || row.rowStatus === "overdue");
   const submittedText = plan.status === "submitted" ? "Submitted for review" : "Draft ready for manager review";
 
@@ -464,11 +588,14 @@ async function summarizeDashboard(env: Env, user: UserSession): Promise<Dashboar
       { label: "Pending Tasks", value: `${pendingRows.length} open items`, tone: pendingRows.length ? "alert" : "calm" },
       { label: "KPI Snapshot", value: "73/100 provisional score", tone: "calm" },
     ],
-    todayPlan: plan.rows.slice(0, 2).map((row) => ({
-      title: row.activity,
-      meta: `Planned for ${row.workDate}`,
-      hint: row.expectedOutput,
-    })),
+    todayPlan: plan.rows
+      .filter((row) => row.workDate === today || row.rowStatus === "pending" || row.rowStatus === "overdue")
+      .slice(0, 3)
+      .map((row) => ({
+        title: row.activity,
+        meta: row.workDate === today ? "Due today" : `Open from ${row.workDate}`,
+        hint: row.expectedOutput,
+      })),
     pending: pendingRows.map((row) => ({
       title: row.activity,
       meta: row.rowStatus === "overdue" ? "Overdue task" : "Pending task",
@@ -537,6 +664,386 @@ async function resequenceTravelRows(env: Env, planId: string) {
       ).bind(index + 1, row.id),
     ),
   );
+}
+
+async function findDailySheetRecord(env: Env, userId: string, workDate: string) {
+  return env.DB.prepare(
+    `
+      SELECT id, user_id, work_date, status, note
+      FROM daily_sheets
+      WHERE user_id = ? AND work_date = ?
+      LIMIT 1
+    `,
+  )
+    .bind(userId, workDate)
+    .first<DailySheetRecord>();
+}
+
+async function ensureDailySheetRecord(env: Env, user: UserSession, workDate: string) {
+  const existing = await findDailySheetRecord(env, user.id, workDate);
+  if (existing) return existing;
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `
+      INSERT INTO daily_sheets (id, user_id, work_date, status, note)
+      VALUES (?, ?, ?, 'draft', '')
+    `,
+  )
+    .bind(id, user.id, workDate)
+    .run();
+
+  const record = await findDailySheetRecord(env, user.id, workDate);
+  if (!record) throw new Error("Unable to create daily sheet.");
+  return record;
+}
+
+async function fetchTaskOptions(env: Env, planId: string, workDate: string): Promise<TaskLinkOption[]> {
+  const [planRows, travelRows] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT id, work_date, planned_activity, expected_output, row_status
+        FROM monthly_work_plan_rows
+        WHERE work_plan_id = ?
+          AND (
+            work_date = ?
+            OR row_status IN ('pending', 'overdue', 'in_progress')
+          )
+          AND row_status NOT IN ('completed', 'cancelled', 'moved_next_month')
+        ORDER BY work_date ASC, serial_no ASC
+      `,
+    )
+      .bind(planId, workDate)
+      .all<{
+        id: string;
+        work_date: string;
+        planned_activity: string | null;
+        expected_output: string | null;
+      }>(),
+    env.DB.prepare(
+      `
+        SELECT id, travel_date, destination, expected_output, status
+        FROM monthly_travel_plan_rows
+        WHERE work_plan_id = ?
+          AND (
+            travel_date = ?
+            OR status IN ('pending', 'overdue')
+          )
+          AND status NOT IN ('completed', 'cancelled')
+        ORDER BY travel_date ASC, serial_no ASC
+      `,
+    )
+      .bind(planId, workDate)
+      .all<{
+        id: string;
+        travel_date: string;
+        destination: string;
+        expected_output: string | null;
+      }>(),
+  ]);
+
+  return [
+    ...planRows.results.map((row) => ({
+      id: row.id,
+      kind: "plan" as const,
+      label: row.planned_activity ?? "Untitled plan row",
+      meta: row.work_date === workDate ? "Planned today" : `Open from ${row.work_date}`,
+      expectedOutput: row.expected_output ?? "",
+    })),
+    ...travelRows.results.map((row) => ({
+      id: row.id,
+      kind: "travel" as const,
+      label: `Travel: ${row.destination}`,
+      meta: row.travel_date === workDate ? "Travel due today" : `Travel open from ${row.travel_date}`,
+      expectedOutput: row.expected_output ?? "",
+    })),
+  ];
+}
+
+async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityRow[]> {
+  const rows = await env.DB.prepare(
+    `
+      SELECT
+        dar.id,
+        dar.line_no,
+        dar.linked_plan_row_id,
+        dar.linked_travel_row_id,
+        dar.start_time,
+        dar.end_time,
+        dar.actual_activity,
+        dar.actual_output,
+        dar.status,
+        dar.delivery_required,
+        dar.delivery_done,
+        dar.is_ad_hoc,
+        dar.ad_hoc_reason,
+        dar.carry_forward_action,
+        dar.row_note,
+        pr.planned_activity AS plan_activity,
+        tr.destination AS travel_destination
+      FROM daily_activity_rows dar
+      LEFT JOIN monthly_work_plan_rows pr ON pr.id = dar.linked_plan_row_id
+      LEFT JOIN monthly_travel_plan_rows tr ON tr.id = dar.linked_travel_row_id
+      WHERE dar.daily_sheet_id = ?
+      ORDER BY dar.line_no ASC
+    `,
+  )
+    .bind(sheetId)
+    .all<DailyRowRecord>();
+
+  return rows.results.map((row) => ({
+    id: row.id,
+    lineNo: row.line_no,
+    linkedPlanRowId: row.linked_plan_row_id,
+    linkedTravelRowId: row.linked_travel_row_id,
+    linkLabel: row.plan_activity ?? (row.travel_destination ? `Travel: ${row.travel_destination}` : null),
+    startTime: row.start_time ?? "",
+    endTime: row.end_time ?? "",
+    actualActivity: row.actual_activity,
+    actualOutput: row.actual_output ?? "",
+    status: row.status,
+    deliveryRequired: row.delivery_required === 1,
+    deliveryDone: row.delivery_done === 1,
+    isAdHoc: row.is_ad_hoc === 1,
+    adHocReason: row.ad_hoc_reason ?? "",
+    carryForwardAction: row.carry_forward_action,
+    rowNote: row.row_note ?? "",
+  }));
+}
+
+async function hydrateDailySheet(env: Env, record: DailySheetRecord, user: UserSession): Promise<DailySheet> {
+  const { month, year } = monthYearFromDate(record.work_date);
+  const plan = await ensurePlan(env, user, month, year);
+  const [rows, taskOptions] = await Promise.all([
+    fetchDailyRows(env, record.id),
+    fetchTaskOptions(env, plan.id, record.work_date),
+  ]);
+
+  return {
+    id: record.id,
+    userId: record.user_id,
+    workDate: record.work_date,
+    status: record.status,
+    note: record.note ?? "",
+    rows,
+    taskOptions,
+  };
+}
+
+async function recomputePlanRowStatus(env: Env, planRowId: string) {
+  const result = await env.DB.prepare(
+    `
+      SELECT status
+      FROM daily_activity_rows
+      WHERE linked_plan_row_id = ?
+    `,
+  )
+    .bind(planRowId)
+    .all<{ status: DailyActivityStatus }>();
+
+  const nextStatus = mapStatusesToPlanStatus(result.results.map((row) => row.status));
+
+  await env.DB.prepare(
+    `
+      UPDATE monthly_work_plan_rows
+      SET row_status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+  )
+    .bind(nextStatus, planRowId)
+    .run();
+}
+
+async function recomputeTravelRowStatus(env: Env, travelRowId: string) {
+  const result = await env.DB.prepare(
+    `
+      SELECT status
+      FROM daily_activity_rows
+      WHERE linked_travel_row_id = ?
+    `,
+  )
+    .bind(travelRowId)
+    .all<{ status: DailyActivityStatus }>();
+
+  const nextStatus = mapStatusesToTravelStatus(result.results.map((row) => row.status));
+
+  await env.DB.prepare(
+    `
+      UPDATE monthly_travel_plan_rows
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+  )
+    .bind(nextStatus, travelRowId)
+    .run();
+}
+
+async function resyncLinkedTargets(
+  env: Env,
+  target: { oldPlanId: string | null; newPlanId: string | null; oldTravelId: string | null; newTravelId: string | null },
+) {
+  const planIds = new Set([target.oldPlanId, target.newPlanId].filter((value): value is string => Boolean(value)));
+  const travelIds = new Set(
+    [target.oldTravelId, target.newTravelId].filter((value): value is string => Boolean(value)),
+  );
+
+  for (const planId of planIds) {
+    await recomputePlanRowStatus(env, planId);
+  }
+
+  for (const travelId of travelIds) {
+    await recomputeTravelRowStatus(env, travelId);
+  }
+}
+
+async function markOpenRowsAsPending(env: Env, user: UserSession, workDate: string) {
+  const { month, year } = monthYearFromDate(workDate);
+  const plan = await ensurePlan(env, user, month, year);
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `
+        UPDATE monthly_work_plan_rows
+        SET row_status = 'pending', updated_at = CURRENT_TIMESTAMP
+        WHERE work_plan_id = ?
+          AND work_date = ?
+          AND row_status IN ('planned', 'in_progress')
+      `,
+    ).bind(plan.id, workDate),
+    env.DB.prepare(
+      `
+        UPDATE monthly_travel_plan_rows
+        SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+        WHERE work_plan_id = ?
+          AND travel_date = ?
+          AND status = 'planned'
+      `,
+    ).bind(plan.id, workDate),
+  ]);
+
+  await syncOverdueStatuses(env, plan.id, workDate);
+}
+
+async function fetchPendingItemsForDate(env: Env, user: UserSession, workDate: string): Promise<PendingItem[]> {
+  const { month, year } = monthYearFromDate(workDate);
+  const plan = await ensurePlan(env, user, month, year);
+
+  const [planRows, travelRows] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT id, work_date, planned_activity, expected_output, row_status, remarks
+        FROM monthly_work_plan_rows
+        WHERE work_plan_id = ?
+          AND row_status IN ('pending', 'overdue')
+        ORDER BY work_date ASC, serial_no ASC
+      `,
+    )
+      .bind(plan.id)
+      .all<PlanRowRecord>(),
+    env.DB.prepare(
+      `
+        SELECT id, travel_date, destination, expected_output, status
+        FROM monthly_travel_plan_rows
+        WHERE work_plan_id = ?
+          AND status IN ('pending', 'overdue')
+        ORDER BY travel_date ASC, serial_no ASC
+      `,
+    )
+      .bind(plan.id)
+      .all<TravelRowRecord>(),
+  ]);
+
+  return [
+    ...planRows.results.map<PendingItem>((row) => ({
+      id: `plan:${row.id}`,
+      kind: "plan" as const,
+      workDate: row.work_date,
+      title: row.planned_activity ?? "Untitled task",
+      expectedOutput: row.expected_output ?? "",
+      status: row.row_status === "overdue" ? "overdue" : "pending",
+      meta: row.row_status === "overdue" ? "Planned date already passed" : "Awaiting follow-up",
+      remarks: row.remarks ?? "",
+    })),
+    ...travelRows.results.map<PendingItem>((row) => ({
+      id: `travel:${row.id}`,
+      kind: "travel" as const,
+      workDate: row.travel_date,
+      title: `Travel: ${row.destination}`,
+      expectedOutput: row.expected_output ?? "",
+      status: row.status === "overdue" ? "overdue" : "pending",
+      meta: row.status === "overdue" ? "Travel date already passed" : "Travel output still open",
+      remarks: "",
+    })),
+  ];
+}
+
+async function applyPendingActionToItem(env: Env, user: UserSession, itemId: string, input: PendingActionInput) {
+  const [kind, rawId] = itemId.split(":");
+  if (!kind || !rawId) {
+    throw new Error("Invalid pending item id.");
+  }
+
+  if (kind === "plan") {
+    const row = await env.DB.prepare(
+      `
+        SELECT mpr.id
+        FROM monthly_work_plan_rows mpr
+        JOIN monthly_work_plans mp ON mp.id = mpr.work_plan_id
+        WHERE mpr.id = ? AND mp.user_id = ?
+        LIMIT 1
+      `,
+    )
+      .bind(rawId, user.id)
+      .first<{ id: string }>();
+
+    if (!row) throw new Error("Pending plan row not found.");
+
+    const nextStatus =
+      input.action === "cancel"
+        ? "cancelled"
+        : input.action === "move_next_month"
+          ? "moved_next_month"
+          : "pending";
+
+    await env.DB.prepare(
+      `
+        UPDATE monthly_work_plan_rows
+        SET row_status = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+      .bind(nextStatus, input.note, rawId)
+      .run();
+
+    return;
+  }
+
+  if (kind === "travel") {
+    const row = await env.DB.prepare(
+      `
+        SELECT mtr.id
+        FROM monthly_travel_plan_rows mtr
+        JOIN monthly_work_plans mp ON mp.id = mtr.work_plan_id
+        WHERE mtr.id = ? AND mp.user_id = ?
+        LIMIT 1
+      `,
+    )
+      .bind(rawId, user.id)
+      .first<{ id: string }>();
+
+    if (!row) throw new Error("Pending travel row not found.");
+
+    const nextStatus = input.action === "cancel" ? "cancelled" : "pending";
+    await env.DB.prepare(
+      `
+        UPDATE monthly_travel_plan_rows
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+      .bind(nextStatus, rawId)
+      .run();
+  }
 }
 
 export default {
@@ -872,6 +1379,316 @@ export default {
           user,
         ),
       );
+    }
+
+    if (url.pathname === "/api/daily-sheets/current" && request.method === "GET") {
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+      const record = await ensureDailySheetRecord(env, user, workDate);
+      return json(await hydrateDailySheet(env, record, user));
+    }
+
+    const sheetMatch = matchRoute(url.pathname, /^\/api\/daily-sheets\/([^/]+)$/);
+    if (sheetMatch && request.method === "PATCH") {
+      const sheetId = sheetMatch[1];
+      const sheet = await env.DB.prepare(
+        `
+          SELECT id, user_id, work_date, status, note
+          FROM daily_sheets
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(sheetId, user.id)
+        .first<DailySheetRecord>();
+
+      if (!sheet) return error("Daily sheet not found.", 404);
+
+      const body = await parseJson<{ note?: string }>(request);
+      await env.DB.prepare(
+        `
+          UPDATE daily_sheets
+          SET note = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+        .bind(body.note ?? sheet.note ?? "", sheetId)
+        .run();
+
+      return json(await hydrateDailySheet(env, { ...sheet, note: body.note ?? sheet.note ?? "" }, user));
+    }
+
+    const createDailyRowMatch = matchRoute(url.pathname, /^\/api\/daily-sheets\/([^/]+)\/rows$/);
+    if (createDailyRowMatch && request.method === "POST") {
+      const sheetId = createDailyRowMatch[1];
+      const sheet = await env.DB.prepare(
+        `
+          SELECT id, user_id, work_date, status, note
+          FROM daily_sheets
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(sheetId, user.id)
+        .first<DailySheetRecord>();
+
+      if (!sheet) return error("Daily sheet not found.", 404);
+
+      const body = await parseJson<DailyActivityRowInput>(request);
+      if (body.isAdHoc && !body.adHocReason.trim()) {
+        return error("Ad hoc activities require a reason.", 400);
+      }
+
+      const serialResult = await env.DB.prepare(
+        `
+          SELECT COALESCE(MAX(line_no), 0) AS last_line
+          FROM daily_activity_rows
+          WHERE daily_sheet_id = ?
+        `,
+      )
+        .bind(sheetId)
+        .first<{ last_line: number }>();
+
+      const rowId = crypto.randomUUID();
+      const lineNo = (serialResult?.last_line ?? 0) + 1;
+
+      await env.DB.prepare(
+        `
+          INSERT INTO daily_activity_rows (
+            id,
+            daily_sheet_id,
+            line_no,
+            linked_plan_row_id,
+            linked_travel_row_id,
+            start_time,
+            end_time,
+            actual_activity,
+            actual_output,
+            status,
+            delivery_required,
+            delivery_done,
+            is_ad_hoc,
+            ad_hoc_reason,
+            carry_forward_action,
+            row_note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+        .bind(
+          rowId,
+          sheetId,
+          lineNo,
+          body.linkedPlanRowId,
+          body.linkedTravelRowId,
+          body.startTime,
+          body.endTime,
+          body.actualActivity,
+          body.actualOutput,
+          body.status,
+          body.deliveryRequired ? 1 : 0,
+          body.deliveryDone ? 1 : 0,
+          body.isAdHoc ? 1 : 0,
+          body.adHocReason,
+          body.carryForwardAction,
+          body.rowNote,
+        )
+        .run();
+
+      await resyncLinkedTargets(env, {
+        oldPlanId: null,
+        newPlanId: body.linkedPlanRowId,
+        oldTravelId: null,
+        newTravelId: body.linkedTravelRowId,
+      });
+
+      const rows = await fetchDailyRows(env, sheetId);
+      const row = rows.find((entry) => entry.id === rowId);
+      if (!row) return error("Unable to load saved activity row.", 500);
+      return json(row, { status: 201 });
+    }
+
+    const dailyRowMatch = matchRoute(url.pathname, /^\/api\/daily-sheets\/([^/]+)\/rows\/([^/]+)$/);
+    if (dailyRowMatch && request.method === "PATCH") {
+      const [, sheetId, rowId] = dailyRowMatch;
+      const sheet = await env.DB.prepare(
+        `
+          SELECT id, user_id, work_date, status, note
+          FROM daily_sheets
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(sheetId, user.id)
+        .first<DailySheetRecord>();
+
+      if (!sheet) return error("Daily sheet not found.", 404);
+
+      const existing = await env.DB.prepare(
+        `
+          SELECT linked_plan_row_id, linked_travel_row_id
+          FROM daily_activity_rows
+          WHERE id = ? AND daily_sheet_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(rowId, sheetId)
+        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null }>();
+
+      if (!existing) return error("Daily activity row not found.", 404);
+
+      const body = await parseJson<DailyActivityRowInput>(request);
+      if (body.isAdHoc && !body.adHocReason.trim()) {
+        return error("Ad hoc activities require a reason.", 400);
+      }
+
+      await env.DB.prepare(
+        `
+          UPDATE daily_activity_rows
+          SET
+            linked_plan_row_id = ?,
+            linked_travel_row_id = ?,
+            start_time = ?,
+            end_time = ?,
+            actual_activity = ?,
+            actual_output = ?,
+            status = ?,
+            delivery_required = ?,
+            delivery_done = ?,
+            is_ad_hoc = ?,
+            ad_hoc_reason = ?,
+            carry_forward_action = ?,
+            row_note = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND daily_sheet_id = ?
+        `,
+      )
+        .bind(
+          body.linkedPlanRowId,
+          body.linkedTravelRowId,
+          body.startTime,
+          body.endTime,
+          body.actualActivity,
+          body.actualOutput,
+          body.status,
+          body.deliveryRequired ? 1 : 0,
+          body.deliveryDone ? 1 : 0,
+          body.isAdHoc ? 1 : 0,
+          body.adHocReason,
+          body.carryForwardAction,
+          body.rowNote,
+          rowId,
+          sheetId,
+        )
+        .run();
+
+      await resyncLinkedTargets(env, {
+        oldPlanId: existing.linked_plan_row_id,
+        newPlanId: body.linkedPlanRowId,
+        oldTravelId: existing.linked_travel_row_id,
+        newTravelId: body.linkedTravelRowId,
+      });
+
+      const rows = await fetchDailyRows(env, sheetId);
+      const row = rows.find((entry) => entry.id === rowId);
+      if (!row) return error("Daily activity row not found after update.", 404);
+      return json(row);
+    }
+
+    if (dailyRowMatch && request.method === "DELETE") {
+      const [, sheetId, rowId] = dailyRowMatch;
+      const sheet = await env.DB.prepare(
+        `
+          SELECT id, user_id, work_date, status, note
+          FROM daily_sheets
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(sheetId, user.id)
+        .first<DailySheetRecord>();
+
+      if (!sheet) return error("Daily sheet not found.", 404);
+
+      const existing = await env.DB.prepare(
+        `
+          SELECT linked_plan_row_id, linked_travel_row_id
+          FROM daily_activity_rows
+          WHERE id = ? AND daily_sheet_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(rowId, sheetId)
+        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null }>();
+
+      if (!existing) return error("Daily activity row not found.", 404);
+
+      await env.DB.prepare(
+        `
+          DELETE FROM daily_activity_rows
+          WHERE id = ? AND daily_sheet_id = ?
+        `,
+      )
+        .bind(rowId, sheetId)
+        .run();
+
+      await resyncLinkedTargets(env, {
+        oldPlanId: existing.linked_plan_row_id,
+        newPlanId: null,
+        oldTravelId: existing.linked_travel_row_id,
+        newTravelId: null,
+      });
+
+      return json({ success: true });
+    }
+
+    const submitSheetMatch = matchRoute(url.pathname, /^\/api\/daily-sheets\/([^/]+)\/submit$/);
+    if (submitSheetMatch && request.method === "POST") {
+      const sheetId = submitSheetMatch[1];
+      const sheet = await env.DB.prepare(
+        `
+          SELECT id, user_id, work_date, status, note
+          FROM daily_sheets
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(sheetId, user.id)
+        .first<DailySheetRecord>();
+
+      if (!sheet) return error("Daily sheet not found.", 404);
+
+      await env.DB.prepare(
+        `
+          UPDATE daily_sheets
+          SET status = 'submitted', submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+        .bind(sheetId)
+        .run();
+
+      await markOpenRowsAsPending(env, user, sheet.work_date);
+      const latest = await findDailySheetRecord(env, user.id, sheet.work_date);
+      if (!latest) return error("Unable to reload daily sheet.", 500);
+      return json(await hydrateDailySheet(env, latest, user));
+    }
+
+    if (url.pathname === "/api/pending" && request.method === "GET") {
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+      return json(await fetchPendingItemsForDate(env, user, workDate));
+    }
+
+    const pendingActionMatch = matchRoute(url.pathname, /^\/api\/pending\/([^/]+)\/action$/);
+    if (pendingActionMatch && request.method === "POST") {
+      const itemId = decodeURIComponent(pendingActionMatch[1]);
+      const body = await parseJson<PendingActionInput>(request);
+
+      try {
+        await applyPendingActionToItem(env, user, itemId, body);
+      } catch (caught) {
+        return error(caught instanceof Error ? caught.message : "Unable to apply pending action.", 400);
+      }
+
+      return json({ success: true });
     }
 
     return env.ASSETS.fetch(request);

@@ -80,7 +80,7 @@ export interface TravelPlanRow {
   destination: string;
   purpose: string;
   expectedOutput: string;
-  status: "planned" | "completed" | "pending";
+  status: "planned" | "completed" | "pending" | "overdue" | "cancelled";
 }
 
 export interface MonthlyWorkPlan {
@@ -114,6 +114,91 @@ export interface TravelPlanRowInput {
   destination: string;
   purpose: string;
   expectedOutput: string;
+}
+
+export type DailySheetStatus = "draft" | "submitted" | "approved" | "returned" | "locked";
+
+export type DailyActivityStatus =
+  | "not_started"
+  | "in_progress"
+  | "completed"
+  | "deferred"
+  | "cancelled";
+
+export type CarryForwardAction =
+  | "none"
+  | "continue_next_day"
+  | "reschedule_current_month"
+  | "move_next_month"
+  | "cancel";
+
+export interface TaskLinkOption {
+  id: string;
+  kind: "plan" | "travel";
+  label: string;
+  meta: string;
+  expectedOutput: string;
+}
+
+export interface DailyActivityRow {
+  id: string;
+  lineNo: number;
+  linkedPlanRowId: string | null;
+  linkedTravelRowId: string | null;
+  linkLabel: string | null;
+  startTime: string;
+  endTime: string;
+  actualActivity: string;
+  actualOutput: string;
+  status: DailyActivityStatus;
+  deliveryRequired: boolean;
+  deliveryDone: boolean;
+  isAdHoc: boolean;
+  adHocReason: string;
+  carryForwardAction: CarryForwardAction;
+  rowNote: string;
+}
+
+export interface DailySheet {
+  id: string;
+  userId: string;
+  workDate: string;
+  status: DailySheetStatus;
+  note: string;
+  rows: DailyActivityRow[];
+  taskOptions: TaskLinkOption[];
+}
+
+export interface DailyActivityRowInput {
+  linkedPlanRowId: string | null;
+  linkedTravelRowId: string | null;
+  startTime: string;
+  endTime: string;
+  actualActivity: string;
+  actualOutput: string;
+  status: DailyActivityStatus;
+  deliveryRequired: boolean;
+  deliveryDone: boolean;
+  isAdHoc: boolean;
+  adHocReason: string;
+  carryForwardAction: CarryForwardAction;
+  rowNote: string;
+}
+
+export interface PendingItem {
+  id: string;
+  kind: "plan" | "travel";
+  workDate: string;
+  title: string;
+  expectedOutput: string;
+  status: "pending" | "overdue";
+  meta: string;
+  remarks: string;
+}
+
+export interface PendingActionInput {
+  action: CarryForwardAction;
+  note: string;
 }
 
 export interface ApiResponse<T> {

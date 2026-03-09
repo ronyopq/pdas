@@ -3,7 +3,9 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
+import { PendingPage } from "./pages/PendingPage";
 import { SimplePage } from "./pages/SimplePage";
+import { TodayPage } from "./pages/TodayPage";
 import { WorkPlanPage } from "./pages/WorkPlanPage";
 import type { DashboardPayload, NavigationItem } from "../shared/domain";
 import { fetchDashboard, fetchNavigation } from "../shared/api";
@@ -57,34 +59,8 @@ export default function App() {
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="/" element={<DashboardPage dashboard={dashboard} />} />
         <Route path="/plan" element={<WorkPlanPage />} />
-        <Route
-          path="/today"
-          element={
-            <SimplePage
-              title="Daily Activity"
-              description="Daily execution stays linked to approved plan rows and travel items."
-              bullets={[
-                "Multiple time rows per day",
-                "Delivery and note sections match the print format",
-                "Ad hoc work remains separately reportable",
-              ]}
-            />
-          }
-        />
-        <Route
-          path="/pending"
-          element={
-            <SimplePage
-              title="Pending Board"
-              description="Carry-forward, overdue and next-month actions live here."
-              bullets={[
-                "Continue tomorrow",
-                "Reschedule in current month",
-                "Move to next month",
-              ]}
-            />
-          }
-        />
+        <Route path="/today" element={<TodayPage />} />
+        <Route path="/pending" element={<PendingPage />} />
         <Route
           path="/report"
           element={

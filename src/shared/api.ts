@@ -1,9 +1,14 @@
 import type {
   ApiResponse,
+  DailyActivityRow,
+  DailyActivityRowInput,
+  DailySheet,
   DashboardPayload,
   LoginInput,
   MonthlyWorkPlan,
   NavigationItem,
+  PendingActionInput,
+  PendingItem,
   TravelPlanRow,
   TravelPlanRowInput,
   UserSession,
@@ -128,5 +133,53 @@ export function deleteTravelRow(planId: string, rowId: string) {
 export function submitWorkPlan(planId: string) {
   return requestJson<MonthlyWorkPlan>(`/api/work-plans/${planId}/submit`, {
     method: "POST",
+  });
+}
+
+export function fetchCurrentDailySheet(workDate: string) {
+  return requestJson<DailySheet>(`/api/daily-sheets/current?date=${workDate}`);
+}
+
+export function updateDailySheet(sheetId: string, note: string) {
+  return requestJson<DailySheet>(`/api/daily-sheets/${sheetId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function addDailyActivityRow(sheetId: string, input: DailyActivityRowInput) {
+  return requestJson<DailyActivityRow>(`/api/daily-sheets/${sheetId}/rows`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDailyActivityRow(sheetId: string, rowId: string, input: DailyActivityRowInput) {
+  return requestJson<DailyActivityRow>(`/api/daily-sheets/${sheetId}/rows/${rowId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteDailyActivityRow(sheetId: string, rowId: string) {
+  return requestJson<{ success: true }>(`/api/daily-sheets/${sheetId}/rows/${rowId}`, {
+    method: "DELETE",
+  });
+}
+
+export function submitDailySheet(sheetId: string) {
+  return requestJson<DailySheet>(`/api/daily-sheets/${sheetId}/submit`, {
+    method: "POST",
+  });
+}
+
+export function fetchPendingItems(workDate: string) {
+  return requestJson<PendingItem[]>(`/api/pending?date=${workDate}`);
+}
+
+export function applyPendingAction(itemId: string, input: PendingActionInput) {
+  return requestJson<{ success: true }>(`/api/pending/${itemId}/action`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }
