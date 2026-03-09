@@ -29,23 +29,46 @@ const workTypeOptions: WorkPlanRow["rowType"][] = [
   "reserved",
 ];
 
-const monthText = new Intl.DateTimeFormat("en-US", {
-  month: "long",
-  year: "numeric",
-}).format(new Date("2026-03-01"));
+function currentMonthInDhaka() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dhaka",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
 
-function emptyPlanRow(): WorkPlanRowInput {
+  const year = parts.find((part) => part.type === "year")?.value ?? "2026";
+  const month = parts.find((part) => part.type === "month")?.value ?? "03";
+  return `${year}-${month}`;
+}
+
+function parseMonthValue(monthValue: string) {
+  const [year, month] = monthValue.split("-").map(Number);
+  return { month, year };
+}
+
+function monthLabel(monthValue: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric",
+  }).format(new Date(`${monthValue}-01`));
+}
+
+function defaultDateForMonth(monthValue: string) {
+  return `${monthValue}-01`;
+}
+
+function emptyPlanRow(workDate: string): WorkPlanRowInput {
   return {
-    workDate: "2026-03-09",
+    workDate,
     activity: "",
     expectedOutput: "",
     rowType: "regular_work",
   };
 }
 
-function emptyTravelRow(): TravelPlanRowInput {
+function emptyTravelRow(travelDate: string): TravelPlanRowInput {
   return {
-    travelDate: "2026-03-09",
+    travelDate,
     destination: "",
     purpose: "",
     expectedOutput: "",
@@ -53,23 +76,31 @@ function emptyTravelRow(): TravelPlanRowInput {
 }
 
 export function WorkPlanPage() {
+  const [monthValue, setMonthValue] = useState(currentMonthInDhaka());
   const [plan, setPlan] = useState<MonthlyWorkPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preparedDate, setPreparedDate] = useState("2026-03-01");
-  const [newRow, setNewRow] = useState<WorkPlanRowInput>(emptyPlanRow());
-  const [newTravelRow, setNewTravelRow] = useState<TravelPlanRowInput>(emptyTravelRow());
+  const [preparedDate, setPreparedDate] = useState(defaultDateForMonth(currentMonthInDhaka()));
+  const [newRow, setNewRow] = useState<WorkPlanRowInput>(emptyPlanRow(defaultDateForMonth(currentMonthInDhaka())));
+  const [newTravelRow, setNewTravelRow] = useState<TravelPlanRowInput>(
+    emptyTravelRow(defaultDateForMonth(currentMonthInDhaka())),
+  );
 
   useEffect(() => {
-    fetchCurrentWorkPlan(3, 2026)
+    const { month, year } = parseMonthValue(monthValue);
+    const monthStart = defaultDateForMonth(monthValue);
+    setLoading(true);
+    fetchCurrentWorkPlan(month, year)
       .then((result) => {
         setPlan(result.data);
         setPreparedDate(result.data.preparedDate);
+        setNewRow(emptyPlanRow(monthStart));
+        setNewTravelRow(emptyTravelRow(monthStart));
       })
       .catch(() => setError("Unable to load the current work plan."))
       .finally(() => setLoading(false));
-  }, []);
+  }, [monthValue]);
 
   const pendingCount = useMemo(
     () =>
@@ -132,7 +163,7 @@ export function WorkPlanPage() {
             }
           : current,
       );
-      setNewRow(emptyPlanRow());
+      setNewRow(emptyPlanRow(defaultDateForMonth(monthValue)));
     } catch {
       setError("Unable to add a new plan row.");
     } finally {
@@ -206,7 +237,7 @@ export function WorkPlanPage() {
             }
           : current,
       );
-      setNewTravelRow(emptyTravelRow());
+      setNewTravelRow(emptyTravelRow(defaultDateForMonth(monthValue)));
     } catch {
       setError("Unable to add a new travel row.");
     } finally {
@@ -266,7 +297,7 @@ export function WorkPlanPage() {
           <div className="section-heading">
             <h3>Monthly work plan</h3>
             <p>
-              {monthText} for {plan.employeeName}. Status: <strong>{plan.status}</strong>
+              {monthLabel(monthValue)} for {plan.employeeName}. Status: <strong>{plan.status}</strong>
             </p>
           </div>
           <div className="toolbar-actions">
@@ -280,6 +311,10 @@ export function WorkPlanPage() {
         </div>
 
         <div className="form-grid compact-grid">
+          <label>
+            <span>Month</span>
+            <input type="month" value={monthValue} onChange={(event) => setMonthValue(event.target.value)} />
+          </label>
           <label>
             <span>Prepared Date</span>
             <input
