@@ -1,15 +1,17 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
-import type { NavigationItem } from "../../shared/domain";
+import type { NavigationItem, UserSession } from "../../shared/domain";
 
 interface AppShellProps {
   navItems: NavigationItem[];
   title: string;
   subtitle: string;
+  user: UserSession;
+  onLogout: () => void;
   children: ReactNode;
 }
 
-export function AppShell({ navItems, title, subtitle, children }: AppShellProps) {
+export function AppShell({ navItems, title, subtitle, user, onLogout, children }: AppShellProps) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -31,6 +33,15 @@ export function AppShell({ navItems, title, subtitle, children }: AppShellProps)
             </NavLink>
           ))}
         </nav>
+
+        <div className="user-panel">
+          <strong>{user.fullName}</strong>
+          <span>{user.designation}</span>
+          <small>{user.employeeCode}</small>
+          <button type="button" className="ghost-button" onClick={onLogout}>
+            Sign out
+          </button>
+        </div>
       </aside>
 
       <main className="content-panel">

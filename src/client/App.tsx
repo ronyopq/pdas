@@ -1,42 +1,62 @@
 import { useEffect, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { DashboardPage } from "./pages/DashboardPage";
+import { LoginPage } from "./pages/LoginPage";
 import { SimplePage } from "./pages/SimplePage";
+import { WorkPlanPage } from "./pages/WorkPlanPage";
 import type { DashboardPayload, NavigationItem } from "../shared/domain";
 import { fetchDashboard, fetchNavigation } from "../shared/api";
+import { useAuth } from "./auth/AuthContext";
 
 export default function App() {
+  const { user, loading, login, logout } = useAuth();
   const [navItems, setNavItems] = useState<NavigationItem[]>([]);
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
 
   useEffect(() => {
+    if (!user) {
+      setNavItems([]);
+      setDashboard(null);
+      return;
+    }
+
     fetchNavigation().then((result) => setNavItems(result.data)).catch(() => setNavItems([]));
     fetchDashboard().then((result) => setDashboard(result.data)).catch(() => setDashboard(null));
-  }, []);
+  }, [user]);
+
+  if (loading) {
+    return (
+      <div className="login-shell">
+        <section className="login-card">
+          <span className="brand-mark">PRAAN</span>
+          <h1>Loading workspace...</h1>
+        </section>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage onLogin={login} />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
 
   return (
     <AppShell
       navItems={navItems}
       title="Activity Operating System"
       subtitle="Scaffolded for monthly planning, daily execution, reporting, KPI and exports."
+      user={user}
+      onLogout={logout}
     >
       <Routes>
+        <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="/" element={<DashboardPage dashboard={dashboard} />} />
-        <Route
-          path="/plan"
-          element={
-            <SimplePage
-              title="Monthly Work Plan"
-              description="Date-wise planning, travel plan and approval flow start here."
-              bullets={[
-                "Auto-generate rows for the month",
-                "Keep the Excel-compatible header and signature block",
-                "Track revisions before manager approval",
-              ]}
-            />
-          }
-        />
+        <Route path="/plan" element={<WorkPlanPage />} />
         <Route
           path="/today"
           element={
@@ -96,6 +116,7 @@ export default function App() {
         <Route
           path="/team"
           element={
+            user.role === "manager" || user.role === "admin" || user.role === "super_admin" ? (
             <SimplePage
               title="Manager Workspace"
               description="Managers review work plans, missing submissions and KPI queues here."
@@ -105,11 +126,15 @@ export default function App() {
                 "Employee detail drilldown",
               ]}
             />
+            ) : (
+              <Navigate to="/" replace />
+            )
           }
         />
         <Route
           path="/admin"
           element={
+            user.role === "admin" || user.role === "super_admin" ? (
             <SimplePage
               title="Admin Workspace"
               description="Admin filters, batch exports, template management and governance."
@@ -119,6 +144,9 @@ export default function App() {
                 "Bulk Excel, Word and PDF exports",
               ]}
             />
+            ) : (
+              <Navigate to="/" replace />
+            )
           }
         />
         <Route
@@ -135,8 +163,8 @@ export default function App() {
             />
           }
         />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>
   );
 }
-

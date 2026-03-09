@@ -1,20 +1,132 @@
-import type { ApiResponse, DashboardPayload, NavigationItem } from "./domain";
+import type {
+  ApiResponse,
+  DashboardPayload,
+  LoginInput,
+  MonthlyWorkPlan,
+  NavigationItem,
+  TravelPlanRow,
+  TravelPlanRowInput,
+  UserSession,
+  WorkPlanRow,
+  WorkPlanRowInput,
+} from "./domain";
 
-async function getJson<T>(input: string): Promise<ApiResponse<T>> {
-  const response = await fetch(input);
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+async function requestJson<T>(input: string, init?: RequestInit): Promise<ApiResponse<T>> {
+  const response = await fetch(input, {
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+    ...init,
+  });
 
   if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`);
+    let message = `Request failed with status ${response.status}`;
+
+    try {
+      const payload = (await response.json()) as { error?: string };
+      if (payload.error) {
+        message = payload.error;
+      }
+    } catch {
+      // Ignore invalid JSON error bodies.
+    }
+
+    throw new ApiError(message, response.status);
   }
 
   return (await response.json()) as ApiResponse<T>;
 }
 
 export function fetchNavigation() {
-  return getJson<NavigationItem[]>("/api/meta/navigation");
+  return requestJson<NavigationItem[]>("/api/meta/navigation");
 }
 
 export function fetchDashboard() {
-  return getJson<DashboardPayload>("/api/dashboard/summary");
+  return requestJson<DashboardPayload>("/api/dashboard/summary");
 }
 
+export function fetchCurrentUser() {
+  return requestJson<UserSession>("/api/auth/me");
+}
+
+export function login(input: LoginInput) {
+  return requestJson<UserSession>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function logout() {
+  return requestJson<{ success: true }>("/api/auth/logout", {
+    method: "POST",
+  });
+}
+
+export function fetchCurrentWorkPlan(month: number, year: number) {
+  return requestJson<MonthlyWorkPlan>(`/api/work-plans/current?month=${month}&year=${year}`);
+}
+
+export function updateWorkPlan(planId: string, preparedDate: string) {
+  return requestJson<MonthlyWorkPlan>(`/api/work-plans/${planId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ preparedDate }),
+  });
+}
+
+export function addWorkPlanRow(planId: string, input: WorkPlanRowInput) {
+  return requestJson<WorkPlanRow>(`/api/work-plans/${planId}/rows`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkPlanRow(planId: string, rowId: string, input: WorkPlanRowInput) {
+  return requestJson<WorkPlanRow>(`/api/work-plans/${planId}/rows/${rowId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteWorkPlanRow(planId: string, rowId: string) {
+  return requestJson<{ success: true }>(`/api/work-plans/${planId}/rows/${rowId}`, {
+    method: "DELETE",
+  });
+}
+
+export function addTravelRow(planId: string, input: TravelPlanRowInput) {
+  return requestJson<TravelPlanRow>(`/api/work-plans/${planId}/travel-rows`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateTravelRow(planId: string, rowId: string, input: TravelPlanRowInput) {
+  return requestJson<TravelPlanRow>(`/api/work-plans/${planId}/travel-rows/${rowId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteTravelRow(planId: string, rowId: string) {
+  return requestJson<{ success: true }>(`/api/work-plans/${planId}/travel-rows/${rowId}`, {
+    method: "DELETE",
+  });
+}
+
+export function submitWorkPlan(planId: string) {
+  return requestJson<MonthlyWorkPlan>(`/api/work-plans/${planId}/submit`, {
+    method: "POST",
+  });
+}
