@@ -11,6 +11,10 @@ import type {
   NavigationItem,
   PendingActionInput,
   PendingItem,
+  ReviewActionInput,
+  ReviewScope,
+  TeamOverviewPayload,
+  TeamWorkspacePayload,
   TravelPlanRow,
   TravelPlanRowInput,
   UserSession,
@@ -206,5 +210,22 @@ export function regenerateMonthlyReport(reportId: string) {
 export function submitMonthlyReport(reportId: string) {
   return requestJson<MonthlyReport>(`/api/monthly-reports/${reportId}/submit`, {
     method: "POST",
+  });
+}
+
+export function fetchReviewOverview(scope: ReviewScope, month: number, year: number, workDate: string) {
+  return requestJson<TeamOverviewPayload>(`/api/${scope}/overview?month=${month}&year=${year}&date=${workDate}`);
+}
+
+export function fetchReviewWorkspace(scope: ReviewScope, userId: string, month: number, year: number, workDate: string) {
+  return requestJson<TeamWorkspacePayload>(
+    `/api/${scope}/workspace/${userId}?month=${month}&year=${year}&date=${workDate}`,
+  );
+}
+
+export function submitReviewAction(scope: ReviewScope, input: ReviewActionInput) {
+  return requestJson<{ success: true }>(`/api/${scope}/reviews`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }

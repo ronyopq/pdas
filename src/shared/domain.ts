@@ -248,6 +248,69 @@ export interface MonthlyReportUpdateInput {
   comments: string;
 }
 
+export type ReviewScope = "team" | "admin";
+
+export type ReviewEntityType = "monthly_work_plan" | "daily_sheet" | "monthly_report";
+
+export type ReviewAction = "approve" | "return" | "revision_requested";
+
+export interface TeamMemberStatus {
+  userId: string;
+  employeeCode: string;
+  fullName: string;
+  designation: string;
+  role: UserRole;
+  planStatus: PlanStatus;
+  dailyStatus: DailySheetStatus;
+  reportStatus: MonthlyReportStatus;
+  pendingCount: number;
+  overdueCount: number;
+  needsReview: boolean;
+}
+
+export interface ReviewQueueItem {
+  entityType: ReviewEntityType;
+  entityId: string;
+  userId: string;
+  title: string;
+  meta: string;
+  hint: string;
+}
+
+export interface TeamOverviewPayload {
+  scope: ReviewScope;
+  summary: SummaryCard[];
+  members: TeamMemberStatus[];
+  queue: ReviewQueueItem[];
+}
+
+export interface ApprovalHistoryItem {
+  id: string;
+  entityType: ReviewEntityType;
+  action: string;
+  actorName: string;
+  comment: string;
+  actedAt: string;
+}
+
+export interface TeamWorkspacePayload {
+  scope: ReviewScope;
+  member: UserSession;
+  workPlan: MonthlyWorkPlan;
+  dailySheet: DailySheet;
+  monthlyReport: MonthlyReport;
+  pendingItems: PendingItem[];
+  approvalHistory: ApprovalHistoryItem[];
+}
+
+export interface ReviewActionInput {
+  entityType: ReviewEntityType;
+  entityId: string;
+  targetUserId: string;
+  action: ReviewAction;
+  comment: string;
+}
+
 export interface ApiResponse<T> {
   data: T;
   generatedAt: string;

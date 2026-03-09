@@ -29,7 +29,13 @@ import type {
   NavigationItem,
   PendingActionInput,
   PendingItem,
+  ReviewActionInput,
+  ReviewEntityType,
+  ReviewScope,
   TaskLinkOption,
+  TeamMemberStatus,
+  TeamOverviewPayload,
+  TeamWorkspacePayload,
   TravelPlanRow,
   TravelPlanRowInput,
   UserRole,
@@ -140,6 +146,15 @@ interface ReportDailyRecord {
   travel_output: string | null;
 }
 
+interface ApprovalActionRecord {
+  id: string;
+  entity_type: ReviewEntityType;
+  action: string;
+  actor_user_id: string | null;
+  comment: string | null;
+  acted_at: string;
+}
+
 const SESSION_COOKIE = "praan_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 
@@ -164,6 +179,16 @@ const mockUsers: MockUser[] = [
     projectName: "Campaign on RtFN",
     managerName: "Chief Executive",
     role: "manager",
+    password: "demo123",
+  },
+  {
+    id: "user-sadia",
+    employeeCode: "sadia001",
+    fullName: "Sadia Rahman",
+    designation: "Programme Associate",
+    projectName: "Campaign on RtFN",
+    managerName: "Umme Salma",
+    role: "employee",
     password: "demo123",
   },
   {
@@ -303,6 +328,54 @@ async function requireUser(request: Request, env: Env): Promise<UserSession | Re
   }
 
   return user;
+}
+
+function findMockUser(userId: string) {
+  const user = mockUsers.find((entry) => entry.id === userId);
+  return user ? publicUser(user) : null;
+}
+
+function manageableUsersByScope(viewer: UserSession, scope: ReviewScope): UserSession[] {
+  if (scope === "admin") {
+    if (viewer.role !== "admin" && viewer.role !== "super_admin") {
+      return [];
+    }
+
+    return mockUsers
+      .filter((entry) => entry.id !== viewer.id && entry.role !== "admin" && entry.role !== "super_admin")
+      .map(publicUser);
+  }
+
+  if (viewer.role === "manager") {
+    return mockUsers
+      .filter((entry) => entry.role === "employee" && entry.managerName === viewer.fullName)
+      .map(publicUser);
+  }
+
+  if (viewer.role === "admin" || viewer.role === "super_admin") {
+    return mockUsers
+      .filter((entry) => entry.id !== viewer.id && entry.role !== "admin" && entry.role !== "super_admin")
+      .map(publicUser);
+  }
+
+  return [];
+}
+
+function ensureReviewScopeAccess(viewer: UserSession, scope: ReviewScope) {
+  if (scope === "team" && (viewer.role === "manager" || viewer.role === "admin" || viewer.role === "super_admin")) {
+    return true;
+  }
+
+  if (scope === "admin" && (viewer.role === "admin" || viewer.role === "super_admin")) {
+    return true;
+  }
+
+  return false;
+}
+
+function ensureManagedUser(viewer: UserSession, scope: ReviewScope, targetUserId: string) {
+  const target = manageableUsersByScope(viewer, scope).find((entry) => entry.id === targetUserId);
+  return target ?? null;
 }
 
 function navByRole(role: UserRole): NavigationItem[] {
@@ -1891,6 +1964,284 @@ async function exportDailySheetPdf(sheet: DailySheet, user: UserSession) {
   return pdf.save();
 }
 
+async function buildTeamOverview(env: Env, viewer: UserSession, scope: ReviewScope, month: number, year: number, workDate: string): Promise<TeamOverviewPayload> {
+  const members = manageableUsersByScope(viewer, scope);
+  const snapshots = await Promise.all(
+    members.map(async (member) => {
+      const [plan, dailySheet, report, pendingItems] = await Promise.all([
+        ensurePlan(env, member, month, year),
+        ensureDailySheetRecord(env, member, workDate).then((record) => hydrateDailySheet(env, record, member)),
+        ensureMonthlyReport(env, member, month, year),
+        fetchPendingItemsForDate(env, member, workDate),
+      ]);
+
+      const overdueCount = pendingItems.filter((item) => item.status === "overdue").length;
+      return {
+        userId: member.id,
+        employeeCode: member.employeeCode,
+        fullName: member.fullName,
+        designation: member.designation,
+        role: member.role,
+        planStatus: plan.status,
+        dailyStatus: dailySheet.status,
+        reportStatus: report.status,
+        pendingCount: pendingItems.length,
+        overdueCount,
+        needsReview: plan.status === "submitted" || dailySheet.status === "submitted" || report.status === "submitted",
+      } satisfies TeamMemberStatus;
+    }),
+  );
+
+  const detailQueue = await Promise.all(
+    members.map(async (member) => {
+      const [plan, dailySheet, report] = await Promise.all([
+        ensurePlan(env, member, month, year),
+        ensureDailySheetRecord(env, member, workDate).then((record) => hydrateDailySheet(env, record, member)),
+        ensureMonthlyReport(env, member, month, year),
+      ]);
+
+      const items: TeamOverviewPayload["queue"] = [];
+      const memberLabel = `${member.fullName} (${member.employeeCode})`;
+
+      if (plan.status === "submitted") {
+        items.push({
+          entityType: "monthly_work_plan",
+          entityId: plan.id,
+          userId: member.id,
+          title: `${memberLabel} work plan awaiting approval`,
+          meta: `Prepared ${plan.preparedDate}`,
+          hint: "Approve or request revision before daily execution diverges.",
+        });
+      }
+
+      if (dailySheet.status === "submitted") {
+        items.push({
+          entityType: "daily_sheet",
+          entityId: dailySheet.id,
+          userId: member.id,
+          title: `${memberLabel} daily sheet submitted`,
+          meta: workDate,
+          hint: "Review note, delivery completion, and pending carry-forward items.",
+        });
+      }
+
+      if (report.status === "submitted") {
+        items.push({
+          entityType: "monthly_report",
+          entityId: report.id,
+          userId: member.id,
+          title: `${memberLabel} monthly report submitted`,
+          meta: `${String(month).padStart(2, "0")}/${year}`,
+          hint: "Check completed, ongoing, and next-month task snapshots before approval.",
+        });
+      }
+
+      return items;
+    }),
+  );
+
+  return {
+    scope,
+    summary: [
+      {
+        label: "Manageable Users",
+        value: String(snapshots.length),
+        tone: snapshots.length ? "calm" : "focus",
+      },
+      {
+        label: "Needs Review",
+        value: String(snapshots.filter((entry) => entry.needsReview).length),
+        tone: snapshots.some((entry) => entry.needsReview) ? "alert" : "success",
+      },
+      {
+        label: "Pending Items",
+        value: String(snapshots.reduce((sum, entry) => sum + entry.pendingCount, 0)),
+        tone: snapshots.some((entry) => entry.pendingCount > 0) ? "focus" : "success",
+      },
+      {
+        label: "Overdue Items",
+        value: String(snapshots.reduce((sum, entry) => sum + entry.overdueCount, 0)),
+        tone: snapshots.some((entry) => entry.overdueCount > 0) ? "alert" : "calm",
+      },
+    ],
+    members: snapshots,
+    queue: detailQueue.flat(),
+  };
+}
+
+async function buildTeamWorkspace(
+  env: Env,
+  viewer: UserSession,
+  scope: ReviewScope,
+  targetUserId: string,
+  month: number,
+  year: number,
+  workDate: string,
+): Promise<TeamWorkspacePayload> {
+  const member = ensureManagedUser(viewer, scope, targetUserId);
+  if (!member) {
+    throw new Error("Selected user is not visible in this review scope.");
+  }
+
+  const [workPlan, dailyRecord, monthlyReport, pendingItems] = await Promise.all([
+    ensurePlan(env, member, month, year),
+    ensureDailySheetRecord(env, member, workDate),
+    ensureMonthlyReport(env, member, month, year),
+    fetchPendingItemsForDate(env, member, workDate),
+  ]);
+
+  const [dailySheet, approvalHistoryResult] = await Promise.all([
+    hydrateDailySheet(env, dailyRecord, member),
+    env.DB.prepare(
+      `
+        SELECT id, entity_type, action, actor_user_id, comment, acted_at
+        FROM approval_actions
+        WHERE target_user_id = ?
+        ORDER BY acted_at DESC
+        LIMIT 12
+      `,
+    )
+      .bind(member.id)
+      .all<ApprovalActionRecord>(),
+  ]);
+
+  return {
+    scope,
+    member,
+    workPlan,
+    dailySheet,
+    monthlyReport,
+    pendingItems,
+    approvalHistory: approvalHistoryResult.results.map((entry) => ({
+      id: entry.id,
+      entityType: entry.entity_type,
+      action: entry.action,
+      actorName: findMockUser(entry.actor_user_id ?? "")?.fullName ?? "System",
+      comment: entry.comment ?? "",
+      actedAt: entry.acted_at,
+    })),
+  };
+}
+
+async function applyReviewAction(env: Env, viewer: UserSession, scope: ReviewScope, input: ReviewActionInput) {
+  const managedUser = ensureManagedUser(viewer, scope, input.targetUserId);
+  if (!managedUser) {
+    throw new Error("Target user is outside your review scope.");
+  }
+
+  if (input.entityType === "monthly_work_plan") {
+    const plan = await findPlanRecordById(env, input.entityId, managedUser.id);
+    if (!plan) throw new Error("Work plan not found.");
+
+    const nextStatus =
+      input.action === "approve"
+        ? "approved"
+        : input.action === "revision_requested"
+          ? "revision_requested"
+          : plan.status;
+
+    await env.DB.prepare(
+      `
+        UPDATE monthly_work_plans
+        SET
+          status = ?,
+          approved_at = CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE approved_at END,
+          approved_by_user_id = CASE WHEN ? = 'approved' THEN ? ELSE approved_by_user_id END,
+          revision_note = CASE WHEN ? = 'revision_requested' THEN ? ELSE revision_note END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+      .bind(nextStatus, nextStatus, nextStatus, viewer.id, nextStatus, input.comment, input.entityId)
+      .run();
+  }
+
+  if (input.entityType === "daily_sheet") {
+    const sheet = await env.DB.prepare(
+      `
+        SELECT id
+        FROM daily_sheets
+        WHERE id = ? AND user_id = ?
+        LIMIT 1
+      `,
+    )
+      .bind(input.entityId, managedUser.id)
+      .first<{ id: string }>();
+    if (!sheet) throw new Error("Daily sheet not found.");
+
+    const nextStatus = input.action === "approve" ? "approved" : input.action === "return" ? "returned" : "returned";
+    await env.DB.prepare(
+      `
+        UPDATE daily_sheets
+        SET
+          status = ?,
+          approved_at = CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE approved_at END,
+          approved_by_user_id = CASE WHEN ? = 'approved' THEN ? ELSE approved_by_user_id END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+      .bind(nextStatus, nextStatus, nextStatus, viewer.id, input.entityId)
+      .run();
+  }
+
+  if (input.entityType === "monthly_report") {
+    const report = await env.DB.prepare(
+      `
+        SELECT id
+        FROM monthly_reports
+        WHERE id = ? AND user_id = ?
+        LIMIT 1
+      `,
+    )
+      .bind(input.entityId, managedUser.id)
+      .first<{ id: string }>();
+    if (!report) throw new Error("Monthly report not found.");
+
+    const nextStatus =
+      input.action === "approve"
+        ? "approved"
+        : input.action === "revision_requested"
+          ? "revision_requested"
+          : "revision_requested";
+
+    await env.DB.prepare(
+      `
+        UPDATE monthly_reports
+        SET
+          report_status = ?,
+          approved_at = CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE approved_at END,
+          approved_by_user_id = CASE WHEN ? = 'approved' THEN ? ELSE approved_by_user_id END,
+          comments = CASE WHEN ? = 'revision_requested' AND ? <> '' THEN ? ELSE comments END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+      .bind(nextStatus, nextStatus, nextStatus, viewer.id, nextStatus, input.comment, input.comment, input.entityId)
+      .run();
+  }
+
+  try {
+    await env.DB.prepare(
+      `
+        INSERT INTO approval_actions (
+          id,
+          entity_type,
+          entity_id,
+          action,
+          actor_user_id,
+          target_user_id,
+          comment
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+    )
+      .bind(crypto.randomUUID(), input.entityType, input.entityId, input.action, viewer.id, managedUser.id, input.comment)
+      .run();
+  } catch {
+    // Approval status changes should not fail if audit logging is unavailable.
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1964,6 +2315,55 @@ export default {
         manager: ["/api/team/work-plans", "/api/team/reports", "/api/team/kpis"],
         admin: ["/api/admin/users", "/api/admin/templates", "/api/admin/exports"],
       });
+    }
+
+    const reviewOverviewMatch = matchRoute(url.pathname, /^\/api\/(team|admin)\/overview$/);
+    if (reviewOverviewMatch && request.method === "GET") {
+      const scope = reviewOverviewMatch[1] as ReviewScope;
+      if (!ensureReviewScopeAccess(user, scope)) {
+        return error("You do not have access to this review scope.", 403);
+      }
+
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+      return json(await buildTeamOverview(env, user, scope, month, year, workDate));
+    }
+
+    const reviewWorkspaceMatch = matchRoute(url.pathname, /^\/api\/(team|admin)\/workspace\/([^/]+)$/);
+    if (reviewWorkspaceMatch && request.method === "GET") {
+      const scope = reviewWorkspaceMatch[1] as ReviewScope;
+      const targetUserId = decodeURIComponent(reviewWorkspaceMatch[2]);
+      if (!ensureReviewScopeAccess(user, scope)) {
+        return error("You do not have access to this review scope.", 403);
+      }
+
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+
+      try {
+        return json(await buildTeamWorkspace(env, user, scope, targetUserId, month, year, workDate));
+      } catch (caught) {
+        return error(caught instanceof Error ? caught.message : "Unable to load team workspace.", 400);
+      }
+    }
+
+    const reviewActionMatch = matchRoute(url.pathname, /^\/api\/(team|admin)\/reviews$/);
+    if (reviewActionMatch && request.method === "POST") {
+      const scope = reviewActionMatch[1] as ReviewScope;
+      if (!ensureReviewScopeAccess(user, scope)) {
+        return error("You do not have access to this review scope.", 403);
+      }
+
+      const body = await parseJson<ReviewActionInput>(request);
+      try {
+        await applyReviewAction(env, user, scope, body);
+      } catch (caught) {
+        return error(caught instanceof Error ? caught.message : "Unable to apply review action.", 400);
+      }
+
+      return json({ success: true });
     }
 
     if (url.pathname === "/api/work-plans/current" && request.method === "GET") {

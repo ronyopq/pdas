@@ -6,6 +6,7 @@ import { ExportPage } from "./pages/ExportPage";
 import { LoginPage } from "./pages/LoginPage";
 import { PendingPage } from "./pages/PendingPage";
 import { ReportPage } from "./pages/ReportPage";
+import { ReviewWorkspacePage } from "./pages/ReviewWorkspacePage";
 import { SimplePage } from "./pages/SimplePage";
 import { TodayPage } from "./pages/TodayPage";
 import { WorkPlanPage } from "./pages/WorkPlanPage";
@@ -82,15 +83,7 @@ export default function App() {
           path="/team"
           element={
             user.role === "manager" || user.role === "admin" || user.role === "super_admin" ? (
-            <SimplePage
-              title="Manager Workspace"
-              description="Managers review work plans, missing submissions and KPI queues here."
-              bullets={[
-                "Approval queue",
-                "Overdue filters",
-                "Employee detail drilldown",
-              ]}
-            />
+              <ReviewWorkspacePage scope="team" />
             ) : (
               <Navigate to="/" replace />
             )
@@ -100,15 +93,7 @@ export default function App() {
           path="/admin"
           element={
             user.role === "admin" || user.role === "super_admin" ? (
-            <SimplePage
-              title="Admin Workspace"
-              description="Admin filters, batch exports, template management and governance."
-              bullets={[
-                "Organization-wide compliance monitoring",
-                "Template activation",
-                "Bulk Excel, Word and PDF exports",
-              ]}
-            />
+              <ReviewWorkspacePage scope="admin" />
             ) : (
               <Navigate to="/" replace />
             )
