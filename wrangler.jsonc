@@ -16,20 +16,18 @@
   "vars": {
     "APP_NAME": "PRAAN Activity App",
     "APP_TIMEZONE": "Asia/Dhaka"
-  }
-  // Add these after provisioning:
-  // "d1_databases": [
-  //   {
-  //     "binding": "DB",
-  //     "database_name": "praan-activity-prod",
-  //     "database_id": "REPLACE_WITH_DATABASE_ID"
-  //   }
-  // ],
-  // "r2_buckets": [
-  //   {
-  //     "binding": "FILES",
-  //     "bucket_name": "praan-activity-files-prod"
-  //   }
-  // ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "praan_daily",
+      "database_id": "773d859a-f6c2-4863-be90-50677e2a7a5a"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "faa4092231914da99007236ee6329086"
+    }
+  ]
 }
-

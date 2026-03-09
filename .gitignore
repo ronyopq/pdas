@@ -6,5 +6,6 @@ dist/
 coverage/
 bootstrap-app/
 extracted/
+File Formet/
 worker-configuration.d.ts
 npm-debug.log*
