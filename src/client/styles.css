@@ -1,0 +1,238 @@
+:root {
+  font-family: Manrope, "Segoe UI", sans-serif;
+  color: #13343b;
+  background:
+    radial-gradient(circle at top left, rgba(255, 194, 102, 0.35), transparent 26rem),
+    radial-gradient(circle at bottom right, rgba(36, 128, 115, 0.2), transparent 22rem),
+    #f5f1e8;
+  line-height: 1.5;
+  font-weight: 500;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: grid;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  border-right: 1px solid rgba(19, 52, 59, 0.1);
+  background: rgba(255, 251, 245, 0.72);
+  backdrop-filter: blur(20px);
+}
+
+.brand-card,
+.page-card,
+.stat-card {
+  border: 1px solid rgba(19, 52, 59, 0.08);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 24px 60px rgba(19, 52, 59, 0.08);
+}
+
+.brand-card {
+  padding: 1.25rem;
+}
+
+.brand-card h1 {
+  margin: 0.4rem 0 0.35rem;
+  font-size: 1.8rem;
+  line-height: 1.08;
+}
+
+.brand-card p,
+.section-heading p,
+.stack-list p,
+.stack-list span {
+  color: #4e666b;
+}
+
+.brand-mark,
+.eyebrow {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #0f7e73;
+}
+
+.nav-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.nav-link {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  background: transparent;
+  transition: 160ms ease;
+}
+
+.nav-link:hover,
+.nav-link.is-active {
+  background: rgba(15, 126, 115, 0.12);
+}
+
+.nav-link span {
+  font-weight: 700;
+}
+
+.nav-link small {
+  font-size: 0.82rem;
+  color: #5d7378;
+}
+
+.content-panel {
+  padding: 1.25rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.topbar h2,
+.section-heading h3 {
+  margin: 0.2rem 0;
+}
+
+.topbar-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.topbar-pills span {
+  padding: 0.55rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(15, 126, 115, 0.1);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.page-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.page-card {
+  padding: 1.25rem;
+}
+
+.stat-card {
+  display: grid;
+  gap: 0.55rem;
+  padding: 1rem;
+}
+
+.stat-card span {
+  color: #587075;
+  font-size: 0.92rem;
+}
+
+.stat-card strong {
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.tone-calm {
+  border-top: 6px solid #24776b;
+}
+
+.tone-focus {
+  border-top: 6px solid #de7b2f;
+}
+
+.tone-alert {
+  border-top: 6px solid #c94f4f;
+}
+
+.tone-success {
+  border-top: 6px solid #3b9b5a;
+}
+
+.stack-list {
+  display: grid;
+  gap: 0.9rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stack-list li {
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(244, 248, 247, 0.95);
+}
+
+.stack-list strong {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(19, 52, 59, 0.1);
+  }
+
+  .card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .content-panel,
+  .sidebar {
+    padding: 1rem;
+  }
+
+  .topbar {
+    flex-direction: column;
+  }
+
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+}

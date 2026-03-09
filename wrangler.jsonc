@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "praan-activity-app",
+  "main": "src/server/index.ts",
+  "compatibility_date": "2026-03-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "APP_NAME": "PRAAN Activity App",
+    "APP_TIMEZONE": "Asia/Dhaka"
+  }
+  // Add these after provisioning:
+  // "d1_databases": [
+  //   {
+  //     "binding": "DB",
+  //     "database_name": "praan-activity-prod",
+  //     "database_id": "REPLACE_WITH_DATABASE_ID"
+  //   }
+  // ],
+  // "r2_buckets": [
+  //   {
+  //     "binding": "FILES",
+  //     "bucket_name": "praan-activity-files-prod"
+  //   }
+  // ]
+}
+

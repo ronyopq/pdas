@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.vite/
+.DS_Store
+coverage/
+bootstrap-app/
+extracted/
+worker-configuration.d.ts
+npm-debug.log*
