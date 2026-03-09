@@ -378,6 +378,38 @@ function ensureManagedUser(viewer: UserSession, scope: ReviewScope, targetUserId
   return target ?? null;
 }
 
+async function ensureUserRecord(env: Env, user: UserSession) {
+  await env.DB.prepare(
+    `
+      INSERT INTO users (
+        id,
+        employee_code,
+        full_name,
+        designation,
+        role,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        employee_code = excluded.employee_code,
+        full_name = excluded.full_name,
+        designation = excluded.designation,
+        role = excluded.role,
+        updated_at = CURRENT_TIMESTAMP
+    `,
+  )
+    .bind(user.id, user.employeeCode, user.fullName, user.designation, user.role)
+    .run();
+}
+
+function isConstraintError(error: unknown, constraintType: "UNIQUE" | "FOREIGN KEY") {
+  return (
+    error instanceof Error &&
+    error.message.includes(`${constraintType} constraint failed`)
+  );
+}
+
 function navByRole(role: UserRole): NavigationItem[] {
   const items: NavigationItem[] = [
     { label: "Dashboard", href: "/", description: "Overview of today, pending work and progress." },
@@ -683,6 +715,7 @@ async function createSeedPlan(env: Env, user: UserSession, month: number, year: 
 }
 
 async function ensurePlan(env: Env, user: UserSession, month: number, year: number) {
+  await ensureUserRecord(env, user);
   const existing = await findPlanRecord(env, user.id, month, year);
   const referenceDate = currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
 
@@ -691,7 +724,23 @@ async function ensurePlan(env: Env, user: UserSession, month: number, year: numb
     return hydratePlan(env, existing, user);
   }
 
-  const plan = await createSeedPlan(env, user, month, year);
+  let plan: MonthlyWorkPlan;
+  try {
+    plan = await createSeedPlan(env, user, month, year);
+  } catch (error) {
+    if (isConstraintError(error, "UNIQUE")) {
+      const retriedRecord = await findPlanRecord(env, user.id, month, year);
+      if (!retriedRecord) {
+        throw error;
+      }
+
+      await syncOverdueStatuses(env, retriedRecord.id, referenceDate);
+      return hydratePlan(env, retriedRecord, user);
+    }
+
+    throw error;
+  }
+
   await syncOverdueStatuses(env, plan.id, referenceDate);
   return plan;
 }
@@ -802,18 +851,25 @@ async function findDailySheetRecord(env: Env, userId: string, workDate: string) 
 }
 
 async function ensureDailySheetRecord(env: Env, user: UserSession, workDate: string) {
+  await ensureUserRecord(env, user);
   const existing = await findDailySheetRecord(env, user.id, workDate);
   if (existing) return existing;
 
   const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `
-      INSERT INTO daily_sheets (id, user_id, work_date, status, note)
-      VALUES (?, ?, ?, 'draft', '')
-    `,
-  )
-    .bind(id, user.id, workDate)
-    .run();
+  try {
+    await env.DB.prepare(
+      `
+        INSERT INTO daily_sheets (id, user_id, work_date, status, note)
+        VALUES (?, ?, ?, 'draft', '')
+      `,
+    )
+      .bind(id, user.id, workDate)
+      .run();
+  } catch (error) {
+    if (!isConstraintError(error, "UNIQUE")) {
+      throw error;
+    }
+  }
 
   const record = await findDailySheetRecord(env, user.id, workDate);
   if (!record) throw new Error("Unable to create daily sheet.");
@@ -1464,6 +1520,7 @@ async function hydrateMonthlyReport(env: Env, record: MonthlyReportRecord, user:
 }
 
 async function ensureMonthlyReport(env: Env, user: UserSession, month: number, year: number) {
+  await ensureUserRecord(env, user);
   const existing = await findMonthlyReportRecord(env, user.id, month, year);
   if (existing) {
     return hydrateMonthlyReport(env, existing, user);
@@ -1471,41 +1528,47 @@ async function ensureMonthlyReport(env: Env, user: UserSession, month: number, y
 
   const draft = await buildMonthlyReportDraft(env, user, month, year);
   const reportId = crypto.randomUUID();
-  await env.DB.prepare(
-    `
-      INSERT INTO monthly_reports (
-        id,
-        user_id,
+  try {
+    await env.DB.prepare(
+      `
+        INSERT INTO monthly_reports (
+          id,
+          user_id,
+          month,
+          year,
+          version_no,
+          report_status,
+          project_name_snapshot,
+          designation_snapshot,
+          submission_date,
+          completed_tasks_snapshot_json,
+          ongoing_tasks_snapshot_json,
+          next_month_tasks_snapshot_json,
+          lessons_learned,
+          comments
+        ) VALUES (?, ?, ?, ?, 1, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+    )
+      .bind(
+        reportId,
+        user.id,
         month,
         year,
-        version_no,
-        report_status,
-        project_name_snapshot,
-        designation_snapshot,
-        submission_date,
-        completed_tasks_snapshot_json,
-        ongoing_tasks_snapshot_json,
-        next_month_tasks_snapshot_json,
-        lessons_learned,
-        comments
-      ) VALUES (?, ?, ?, ?, 1, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-  )
-    .bind(
-      reportId,
-      user.id,
-      month,
-      year,
-      user.projectName,
-      user.designation,
-      draft.submissionDate,
-      JSON.stringify(draft.completedTasks),
-      JSON.stringify(draft.ongoingTasks),
-      JSON.stringify(draft.nextMonthTasks),
-      draft.lessonsLearned,
-      draft.comments,
-    )
-    .run();
+        user.projectName,
+        user.designation,
+        draft.submissionDate,
+        JSON.stringify(draft.completedTasks),
+        JSON.stringify(draft.ongoingTasks),
+        JSON.stringify(draft.nextMonthTasks),
+        draft.lessonsLearned,
+        draft.comments,
+      )
+      .run();
+  } catch (error) {
+    if (!isConstraintError(error, "UNIQUE")) {
+      throw error;
+    }
+  }
 
   const latest = await findMonthlyReportRecord(env, user.id, month, year);
   if (!latest) {
@@ -2129,6 +2192,9 @@ async function applyReviewAction(env: Env, viewer: UserSession, scope: ReviewSco
     throw new Error("Target user is outside your review scope.");
   }
 
+  await ensureUserRecord(env, viewer);
+  await ensureUserRecord(env, managedUser);
+
   if (input.entityType === "monthly_work_plan") {
     const plan = await findPlanRecordById(env, input.entityId, managedUser.id);
     if (!plan) throw new Error("Work plan not found.");
@@ -2244,33 +2310,42 @@ async function applyReviewAction(env: Env, viewer: UserSession, scope: ReviewSco
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (url.pathname === "/api/health") {
-      return json({
-        status: "ok",
-        appName: env.APP_NAME ?? "PRAAN Activity App",
-        timezone: env.APP_TIMEZONE ?? "Asia/Dhaka",
-      });
-    }
-
-    if (url.pathname === "/api/auth/login" && request.method === "POST") {
-      const body = await parseJson<LoginInput>(request);
-      const user = mockUsers.find(
-        (entry) => entry.employeeCode.toLowerCase() === body.employeeCode.toLowerCase() && entry.password === body.password,
-      );
-
-      if (!user) {
-        return error("Invalid employee code or password.", 401);
+      if (url.pathname === "/api/health") {
+        return json({
+          status: "ok",
+          appName: env.APP_NAME ?? "PRAAN Activity App",
+          timezone: env.APP_TIMEZONE ?? "Asia/Dhaka",
+        });
       }
 
-      const token = crypto.randomUUID();
-      await persistSession(env, token, user.id);
+      if (url.pathname === "/api/auth/login" && request.method === "POST") {
+        try {
+          const body = await parseJson<LoginInput>(request);
+          const user = mockUsers.find(
+            (entry) => entry.employeeCode.toLowerCase() === body.employeeCode.toLowerCase() && entry.password === body.password,
+          );
 
-      return json(publicUser(user), {
-        headers: sessionHeader(token),
-      });
-    }
+        if (!user) {
+          return error("Invalid employee code or password.", 401);
+        }
+
+        await ensureUserRecord(env, publicUser(user));
+        const token = crypto.randomUUID();
+        await persistSession(env, token, user.id);
+
+          return json(publicUser(user), {
+            headers: sessionHeader(token),
+          });
+        } catch (caught) {
+          return error(
+            `Login failed: ${caught instanceof Error ? caught.message : "Unknown login error."}`,
+            500,
+          );
+        }
+      }
 
     if (url.pathname === "/api/auth/logout" && request.method === "POST") {
       const token = readCookie(request, SESSION_COOKIE);
@@ -3177,6 +3252,12 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+      return env.ASSETS.fetch(request);
+    } catch (caught) {
+      return error(
+        `Unhandled server error: ${caught instanceof Error ? caught.message : "Unknown error."}`,
+        500,
+      );
+    }
   },
 };

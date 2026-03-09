@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "concurrently -k -n CLIENT,WORKER -c cyan,yellow \"npm:dev:client\" \"npm:dev:worker\"",
     "dev:client": "vite",
-    "dev:worker": "wrangler dev",
-    "build": "vite build",
+    "dev:worker": "wrangler dev --config wrangler.worker.jsonc",
+    "build:client": "vite build",
+    "build": "npm run build:client",
     "preview": "vite preview --host",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name pdas --commit-dirty=true",
+    "deploy:worker": "npm run build:client && wrangler deploy --config wrangler.worker.jsonc"
   },
   "dependencies": {
     "docx": "^9.6.0",
@@ -25,6 +27,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
     "concurrently": "^9.2.1",
+    "esbuild": "^0.27.3",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
     "wrangler": "^4.71.0"
