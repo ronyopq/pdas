@@ -5,6 +5,8 @@ import type {
   DailySheet,
   DashboardPayload,
   LoginInput,
+  MonthlyReport,
+  MonthlyReportUpdateInput,
   MonthlyWorkPlan,
   NavigationItem,
   PendingActionInput,
@@ -181,5 +183,28 @@ export function applyPendingAction(itemId: string, input: PendingActionInput) {
   return requestJson<{ success: true }>(`/api/pending/${itemId}/action`, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function fetchCurrentMonthlyReport(month: number, year: number) {
+  return requestJson<MonthlyReport>(`/api/monthly-reports/current?month=${month}&year=${year}`);
+}
+
+export function updateMonthlyReport(reportId: string, input: MonthlyReportUpdateInput) {
+  return requestJson<MonthlyReport>(`/api/monthly-reports/${reportId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function regenerateMonthlyReport(reportId: string) {
+  return requestJson<MonthlyReport>(`/api/monthly-reports/${reportId}/regenerate`, {
+    method: "POST",
+  });
+}
+
+export function submitMonthlyReport(reportId: string) {
+  return requestJson<MonthlyReport>(`/api/monthly-reports/${reportId}/submit`, {
+    method: "POST",
   });
 }

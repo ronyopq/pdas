@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { DashboardPage } from "./pages/DashboardPage";
+import { ExportPage } from "./pages/ExportPage";
 import { LoginPage } from "./pages/LoginPage";
 import { PendingPage } from "./pages/PendingPage";
+import { ReportPage } from "./pages/ReportPage";
 import { SimplePage } from "./pages/SimplePage";
 import { TodayPage } from "./pages/TodayPage";
 import { WorkPlanPage } from "./pages/WorkPlanPage";
@@ -61,20 +63,7 @@ export default function App() {
         <Route path="/plan" element={<WorkPlanPage />} />
         <Route path="/today" element={<TodayPage />} />
         <Route path="/pending" element={<PendingPage />} />
-        <Route
-          path="/report"
-          element={
-            <SimplePage
-              title="Monthly Report"
-              description="Generate the report from actual execution, then export to Word/PDF."
-              bullets={[
-                "Completed tasks snapshot",
-                "Ongoing items and next month draft",
-                "Lessons learned and approval block",
-              ]}
-            />
-          }
-        />
+        <Route path="/report" element={<ReportPage />} />
         <Route
           path="/kpi"
           element={
@@ -125,20 +114,7 @@ export default function App() {
             )
           }
         />
-        <Route
-          path="/exports"
-          element={
-            <SimplePage
-              title="Export Center"
-              description="The export pipeline will generate Excel, Word, PDF and print-ready outputs."
-              bullets={[
-                "Monthly work plan to Excel",
-                "Monthly report to Word",
-                "Daily activity and KPI summaries to PDF",
-              ]}
-            />
-          }
-        />
+        <Route path="/exports" element={<ExportPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>

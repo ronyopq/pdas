@@ -201,6 +201,53 @@ export interface PendingActionInput {
   note: string;
 }
 
+export type MonthlyReportStatus = "draft" | "submitted" | "approved" | "revision_requested" | "locked";
+
+export interface MonthlyReportItem {
+  id: string;
+  title: string;
+  output: string;
+  referenceDate: string;
+  remarks: string;
+  source: "plan" | "travel" | "adhoc" | "carry_forward";
+}
+
+export interface MonthlyReportSummary {
+  completedCount: number;
+  ongoingCount: number;
+  nextMonthCount: number;
+  submittedDayCount: number;
+  adHocCount: number;
+}
+
+export interface MonthlyReport {
+  id: string;
+  userId: string;
+  month: number;
+  year: number;
+  versionNo: number;
+  status: MonthlyReportStatus;
+  employeeName: string;
+  designation: string;
+  projectName: string;
+  submissionDate: string;
+  completedTasks: MonthlyReportItem[];
+  ongoingTasks: MonthlyReportItem[];
+  nextMonthTasks: MonthlyReportItem[];
+  lessonsLearned: string;
+  comments: string;
+  summary: MonthlyReportSummary;
+}
+
+export interface MonthlyReportUpdateInput {
+  submissionDate: string;
+  completedTasks: MonthlyReportItem[];
+  ongoingTasks: MonthlyReportItem[];
+  nextMonthTasks: MonthlyReportItem[];
+  lessonsLearned: string;
+  comments: string;
+}
+
 export interface ApiResponse<T> {
   data: T;
   generatedAt: string;

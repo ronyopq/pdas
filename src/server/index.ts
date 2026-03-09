@@ -1,5 +1,19 @@
 /// <reference types="@cloudflare/workers-types" />
 
+import {
+  AlignmentType,
+  BorderStyle,
+  Document,
+  HeadingLevel,
+  Packer,
+  Paragraph,
+  Table,
+  TableCell,
+  TableRow,
+  TextRun,
+  WidthType,
+} from "docx";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type {
   ApiResponse,
   DailyActivityRow,
@@ -8,6 +22,9 @@ import type {
   DailySheet,
   DashboardPayload,
   LoginInput,
+  MonthlyReport,
+  MonthlyReportItem,
+  MonthlyReportStatus,
   MonthlyWorkPlan,
   NavigationItem,
   PendingActionInput,
@@ -20,6 +37,7 @@ import type {
   WorkPlanRow,
   WorkPlanRowInput,
 } from "../shared/domain";
+import * as XLSX from "xlsx";
 
 interface Env {
   ASSETS: Fetcher;
@@ -89,6 +107,37 @@ interface DailyRowRecord {
   row_note: string | null;
   plan_activity: string | null;
   travel_destination: string | null;
+}
+
+interface MonthlyReportRecord {
+  id: string;
+  user_id: string;
+  month: number;
+  year: number;
+  version_no: number;
+  report_status: MonthlyReportStatus;
+  project_name_snapshot: string | null;
+  designation_snapshot: string | null;
+  submission_date: string | null;
+  completed_tasks_snapshot_json: string;
+  ongoing_tasks_snapshot_json: string;
+  next_month_tasks_snapshot_json: string;
+  lessons_learned: string | null;
+  comments: string | null;
+}
+
+interface ReportDailyRecord {
+  id: string;
+  work_date: string;
+  actual_activity: string;
+  actual_output: string | null;
+  status: DailyActivityRow["status"];
+  is_ad_hoc: number;
+  ad_hoc_reason: string | null;
+  plan_activity: string | null;
+  plan_output: string | null;
+  travel_destination: string | null;
+  travel_output: string | null;
 }
 
 const SESSION_COOKIE = "praan_session";
@@ -1046,6 +1095,802 @@ async function applyPendingActionToItem(env: Env, user: UserSession, itemId: str
   }
 }
 
+function monthKey(month: number, year: number) {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function nextMonthParts(month: number, year: number) {
+  if (month === 12) {
+    return { month: 1, year: year + 1 };
+  }
+
+  return { month: month + 1, year };
+}
+
+function safeParseReportItems(jsonText: string): MonthlyReportItem[] {
+  try {
+    const parsed = JSON.parse(jsonText) as MonthlyReportItem[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function summarizeReport(report: Pick<MonthlyReport, "completedTasks" | "ongoingTasks" | "nextMonthTasks">, submittedDayCount: number, adHocCount: number) {
+  return {
+    completedCount: report.completedTasks.length,
+    ongoingCount: report.ongoingTasks.length,
+    nextMonthCount: report.nextMonthTasks.length,
+    submittedDayCount,
+    adHocCount,
+  };
+}
+
+function reportTitleFromDailyRow(row: ReportDailyRecord) {
+  if (row.is_ad_hoc) {
+    return row.actual_activity;
+  }
+
+  if (row.plan_activity) {
+    return row.plan_activity;
+  }
+
+  if (row.travel_destination) {
+    return `Travel: ${row.travel_destination}`;
+  }
+
+  return row.actual_activity;
+}
+
+async function findMonthlyReportRecord(env: Env, userId: string, month: number, year: number) {
+  return env.DB.prepare(
+    `
+      SELECT
+        id,
+        user_id,
+        month,
+        year,
+        version_no,
+        report_status,
+        project_name_snapshot,
+        designation_snapshot,
+        submission_date,
+        completed_tasks_snapshot_json,
+        ongoing_tasks_snapshot_json,
+        next_month_tasks_snapshot_json,
+        lessons_learned,
+        comments
+      FROM monthly_reports
+      WHERE user_id = ? AND month = ? AND year = ?
+      ORDER BY version_no DESC
+      LIMIT 1
+    `,
+  )
+    .bind(userId, month, year)
+    .first<MonthlyReportRecord>();
+}
+
+async function buildMonthlyReportDraft(env: Env, user: UserSession, month: number, year: number) {
+  const currentPlan = await ensurePlan(env, user, month, year);
+  const currentMonthKey = monthKey(month, year);
+  const nextCycle = nextMonthParts(month, year);
+  const nextPlanRecord = await findPlanRecord(env, user.id, nextCycle.month, nextCycle.year);
+  const nextPlanRows = nextPlanRecord ? await fetchPlanRows(env, nextPlanRecord.id) : [];
+  const nextTravelRows = nextPlanRecord ? await fetchTravelRows(env, nextPlanRecord.id) : [];
+
+  const dailyRowsResult = await env.DB.prepare(
+    `
+      SELECT
+        dar.id,
+        ds.work_date,
+        dar.actual_activity,
+        dar.actual_output,
+        dar.status,
+        dar.is_ad_hoc,
+        dar.ad_hoc_reason,
+        mpr.planned_activity AS plan_activity,
+        mpr.expected_output AS plan_output,
+        mtr.destination AS travel_destination,
+        mtr.expected_output AS travel_output
+      FROM daily_activity_rows dar
+      JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+      LEFT JOIN monthly_work_plan_rows mpr ON mpr.id = dar.linked_plan_row_id
+      LEFT JOIN monthly_travel_plan_rows mtr ON mtr.id = dar.linked_travel_row_id
+      WHERE ds.user_id = ?
+        AND substr(ds.work_date, 1, 7) = ?
+      ORDER BY ds.work_date ASC, dar.line_no ASC
+    `,
+  )
+    .bind(user.id, currentMonthKey)
+    .all<ReportDailyRecord>();
+
+  const submissionStats = await env.DB.prepare(
+    `
+      SELECT
+        COUNT(DISTINCT CASE WHEN status = 'submitted' THEN work_date END) AS submitted_days,
+        COUNT(*) AS total_days
+      FROM daily_sheets
+      WHERE user_id = ?
+        AND substr(work_date, 1, 7) = ?
+    `,
+  )
+    .bind(user.id, currentMonthKey)
+    .first<{ submitted_days: number; total_days: number }>();
+
+  const adHocStats = await env.DB.prepare(
+    `
+      SELECT COUNT(*) AS ad_hoc_count
+      FROM daily_activity_rows dar
+      JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+      WHERE ds.user_id = ?
+        AND substr(ds.work_date, 1, 7) = ?
+        AND dar.is_ad_hoc = 1
+    `,
+  )
+    .bind(user.id, currentMonthKey)
+    .first<{ ad_hoc_count: number }>();
+
+  const completedTasks = dailyRowsResult.results
+    .filter((row) => row.status === "completed")
+    .map<MonthlyReportItem>((row) => ({
+      id: row.id,
+      title: reportTitleFromDailyRow(row),
+      output: row.actual_output ?? row.plan_output ?? row.travel_output ?? "",
+      referenceDate: row.work_date,
+      remarks: row.is_ad_hoc ? `Ad hoc: ${row.ad_hoc_reason ?? ""}` : row.actual_activity,
+      source: row.is_ad_hoc ? "adhoc" : row.travel_destination ? "travel" : "plan",
+    }));
+
+  const ongoingTasks: MonthlyReportItem[] = [
+    ...currentPlan.rows
+      .filter((row) => row.rowStatus === "in_progress" || row.rowStatus === "pending" || row.rowStatus === "overdue")
+      .filter((row) => row.rowType !== "holiday" && row.rowType !== "weekend" && row.rowType !== "leave")
+      .map((row) => ({
+        id: row.id,
+        title: row.activity,
+        output: row.expectedOutput,
+        referenceDate: row.workDate,
+        remarks: row.rowStatus === "overdue" ? "Overdue" : "In progress",
+        source: "plan" as const,
+      })),
+    ...currentPlan.travelRows
+      .filter((row) => row.status === "pending" || row.status === "overdue")
+      .map((row) => ({
+        id: row.id,
+        title: `Travel: ${row.destination}`,
+        output: row.expectedOutput,
+        referenceDate: row.travelDate,
+        remarks: row.status === "overdue" ? "Overdue" : "Pending",
+        source: "travel" as const,
+      })),
+  ];
+
+  const nextMonthTasks: MonthlyReportItem[] =
+    nextPlanRows.length > 0 || nextTravelRows.length > 0
+      ? [
+          ...nextPlanRows
+            .filter((row) => row.rowType !== "holiday" && row.rowType !== "weekend" && row.rowType !== "leave")
+            .map((row) => ({
+              id: row.id,
+              title: row.activity,
+              output: row.expectedOutput,
+              referenceDate: row.workDate,
+              remarks: "Planned next month",
+              source: "plan" as const,
+            })),
+          ...nextTravelRows.map((row) => ({
+            id: row.id,
+            title: `Travel: ${row.destination}`,
+            output: row.expectedOutput,
+            referenceDate: row.travelDate,
+            remarks: "Travel plan",
+            source: "travel" as const,
+          })),
+        ]
+      : [
+          ...currentPlan.rows
+            .filter((row) => row.rowStatus === "pending" || row.rowStatus === "overdue")
+            .map((row) => ({
+              id: row.id,
+              title: row.activity,
+              output: row.expectedOutput,
+              referenceDate: row.workDate,
+              remarks: "Carry forward from current month",
+              source: "carry_forward" as const,
+            })),
+          ...currentPlan.travelRows
+            .filter((row) => row.status === "pending" || row.status === "overdue")
+            .map((row) => ({
+              id: row.id,
+              title: `Travel: ${row.destination}`,
+              output: row.expectedOutput,
+              referenceDate: row.travelDate,
+              remarks: "Carry forward travel item",
+              source: "carry_forward" as const,
+            })),
+        ];
+
+  const submittedDayCount = submissionStats?.submitted_days ?? 0;
+  const adHocCount = adHocStats?.ad_hoc_count ?? 0;
+
+  return {
+    submissionDate: currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka"),
+    completedTasks,
+    ongoingTasks,
+    nextMonthTasks,
+    lessonsLearned: "",
+    comments: "",
+    summary: summarizeReport(
+      {
+        completedTasks,
+        ongoingTasks,
+        nextMonthTasks,
+      },
+      submittedDayCount,
+      adHocCount,
+    ),
+  };
+}
+
+async function hydrateMonthlyReport(env: Env, record: MonthlyReportRecord, user: UserSession): Promise<MonthlyReport> {
+  const submittedDayStats = await env.DB.prepare(
+    `
+      SELECT COUNT(DISTINCT work_date) AS submitted_days
+      FROM daily_sheets
+      WHERE user_id = ?
+        AND substr(work_date, 1, 7) = ?
+        AND status = 'submitted'
+    `,
+  )
+    .bind(user.id, monthKey(record.month, record.year))
+    .first<{ submitted_days: number }>();
+
+  const adHocStats = await env.DB.prepare(
+    `
+      SELECT COUNT(*) AS ad_hoc_count
+      FROM daily_activity_rows dar
+      JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+      WHERE ds.user_id = ?
+        AND substr(ds.work_date, 1, 7) = ?
+        AND dar.is_ad_hoc = 1
+    `,
+  )
+    .bind(user.id, monthKey(record.month, record.year))
+    .first<{ ad_hoc_count: number }>();
+
+  const completedTasks = safeParseReportItems(record.completed_tasks_snapshot_json);
+  const ongoingTasks = safeParseReportItems(record.ongoing_tasks_snapshot_json);
+  const nextMonthTasks = safeParseReportItems(record.next_month_tasks_snapshot_json);
+
+  return {
+    id: record.id,
+    userId: record.user_id,
+    month: record.month,
+    year: record.year,
+    versionNo: record.version_no,
+    status: record.report_status,
+    employeeName: user.fullName,
+    designation: record.designation_snapshot ?? user.designation,
+    projectName: record.project_name_snapshot ?? user.projectName,
+    submissionDate: record.submission_date ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka"),
+    completedTasks,
+    ongoingTasks,
+    nextMonthTasks,
+    lessonsLearned: record.lessons_learned ?? "",
+    comments: record.comments ?? "",
+    summary: summarizeReport(
+      {
+        completedTasks,
+        ongoingTasks,
+        nextMonthTasks,
+      },
+      submittedDayStats?.submitted_days ?? 0,
+      adHocStats?.ad_hoc_count ?? 0,
+    ),
+  };
+}
+
+async function ensureMonthlyReport(env: Env, user: UserSession, month: number, year: number) {
+  const existing = await findMonthlyReportRecord(env, user.id, month, year);
+  if (existing) {
+    return hydrateMonthlyReport(env, existing, user);
+  }
+
+  const draft = await buildMonthlyReportDraft(env, user, month, year);
+  const reportId = crypto.randomUUID();
+  await env.DB.prepare(
+    `
+      INSERT INTO monthly_reports (
+        id,
+        user_id,
+        month,
+        year,
+        version_no,
+        report_status,
+        project_name_snapshot,
+        designation_snapshot,
+        submission_date,
+        completed_tasks_snapshot_json,
+        ongoing_tasks_snapshot_json,
+        next_month_tasks_snapshot_json,
+        lessons_learned,
+        comments
+      ) VALUES (?, ?, ?, ?, 1, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  )
+    .bind(
+      reportId,
+      user.id,
+      month,
+      year,
+      user.projectName,
+      user.designation,
+      draft.submissionDate,
+      JSON.stringify(draft.completedTasks),
+      JSON.stringify(draft.ongoingTasks),
+      JSON.stringify(draft.nextMonthTasks),
+      draft.lessonsLearned,
+      draft.comments,
+    )
+    .run();
+
+  const latest = await findMonthlyReportRecord(env, user.id, month, year);
+  if (!latest) {
+    throw new Error("Unable to create monthly report.");
+  }
+
+  return hydrateMonthlyReport(env, latest, user);
+}
+
+function fileResponse(body: BodyInit | Uint8Array, contentType: string, fileName: string) {
+  return new Response(body as BodyInit, {
+    headers: {
+      "content-type": contentType,
+      "content-disposition": `attachment; filename="${fileName}"`,
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function escapeHtml(text: string) {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function renderReportSectionRows(items: MonthlyReportItem[]) {
+  if (!items.length) {
+    return `<tr><td colspan="4">No items</td></tr>`;
+  }
+
+  return items
+    .map(
+      (item, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${escapeHtml(item.title)}</td>
+          <td>${escapeHtml(item.output)}</td>
+          <td>${escapeHtml(item.referenceDate || item.remarks)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function renderMonthlyReportPrintHtml(report: MonthlyReport) {
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>Monthly Report ${report.year}-${String(report.month).padStart(2, "0")}</title>
+      <style>
+        body { font-family: "Segoe UI", sans-serif; margin: 28px; color: #16363d; }
+        h1, h2, h3, p { margin: 0; }
+        .header { display: grid; gap: 10px; margin-bottom: 18px; }
+        .meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 18px; }
+        .meta div, .panel { border: 1px solid #c9d7d5; border-radius: 10px; padding: 10px 12px; }
+        .panel { margin-bottom: 18px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #d4dfdd; padding: 8px; vertical-align: top; text-align: left; }
+        th { background: #e5f4f1; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        @media print { body { margin: 14px; } }
+      </style>
+    </head>
+    <body>
+      <section class="header">
+        <h1>PRAAN Monthly Report</h1>
+        <p>${escapeHtml(report.projectName)}</p>
+      </section>
+      <section class="meta">
+        <div><strong>Name:</strong> ${escapeHtml(report.employeeName)}</div>
+        <div><strong>Designation:</strong> ${escapeHtml(report.designation)}</div>
+        <div><strong>Reporting Month:</strong> ${String(report.month).padStart(2, "0")}/${report.year}</div>
+        <div><strong>Submission Date:</strong> ${escapeHtml(report.submissionDate)}</div>
+      </section>
+      <section class="panel">
+        <h3>Completed Tasks</h3>
+        <table>
+          <thead><tr><th>#</th><th>Name of the Task</th><th>Output</th><th>Remark / Date</th></tr></thead>
+          <tbody>${renderReportSectionRows(report.completedTasks)}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h3>Ongoing Tasks</h3>
+        <table>
+          <thead><tr><th>#</th><th>Name of the Task</th><th>Output</th><th>Deadline</th></tr></thead>
+          <tbody>${renderReportSectionRows(report.ongoingTasks)}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h3>Tasks for Next Month</h3>
+        <table>
+          <thead><tr><th>#</th><th>Name of the Task</th><th>Output</th><th>Date</th></tr></thead>
+          <tbody>${renderReportSectionRows(report.nextMonthTasks)}</tbody>
+        </table>
+      </section>
+      <section class="two-col">
+        <div class="panel"><h3>Lesson Learned</h3><p>${escapeHtml(report.lessonsLearned || "")}</p></div>
+        <div class="panel"><h3>Comments</h3><p>${escapeHtml(report.comments || "")}</p></div>
+      </section>
+    </body>
+  </html>`;
+}
+
+function renderDailyRowsPrint(rows: DailyActivityRow[]) {
+  const content = rows.length
+    ? rows
+        .map(
+          (row) => `
+            <tr>
+              <td>${escapeHtml(`${row.startTime} - ${row.endTime}`)}</td>
+              <td>${escapeHtml(row.linkLabel ?? row.actualActivity)}</td>
+              <td>${escapeHtml(row.actualOutput)}</td>
+              <td>${row.deliveryDone ? "Done" : row.deliveryRequired ? "Pending" : ""}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : '<tr><td colspan="4">No rows</td></tr>';
+
+  return content;
+}
+
+function renderDailySheetPrintHtml(sheet: DailySheet, user: UserSession) {
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>Daily Activity ${sheet.workDate}</title>
+      <style>
+        body { font-family: "Segoe UI", sans-serif; margin: 24px; color: #15353b; }
+        h1, h2, h3, p { margin: 0; }
+        .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #1c5b62; padding: 10px; vertical-align: top; }
+        th { background: #26b2aa; color: #05191d; }
+        .panel { border: 1px solid #1c5b62; margin-top: 18px; }
+        .panel h3 { background: #26b2aa; padding: 8px 10px; }
+        .panel div { min-height: 120px; padding: 12px; }
+      </style>
+    </head>
+    <body>
+      <section class="header">
+        <div>
+          <h1>Daily Activity Register</h1>
+          <p>${escapeHtml(user.fullName)} | ${escapeHtml(user.designation)}</p>
+        </div>
+        <div><strong>Date:</strong> ${escapeHtml(sheet.workDate)}</div>
+      </section>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Task's Description</th>
+            <th>Output</th>
+            <th>Delivery</th>
+          </tr>
+        </thead>
+        <tbody>${renderDailyRowsPrint(sheet.rows)}</tbody>
+      </table>
+      <section class="panel">
+        <h3>Note</h3>
+        <div>${escapeHtml(sheet.note)}</div>
+      </section>
+    </body>
+  </html>`;
+}
+
+async function exportWorkPlanWorkbook(plan: MonthlyWorkPlan) {
+  const rows = [
+    ["PRAAN Monthly Work Plan"],
+    [],
+    ["Employee Name", plan.employeeName, "Designation", plan.designation],
+    ["Project", plan.projectName, "Supervisor", plan.supervisorName],
+    ["Prepared Date", plan.preparedDate, "Status", plan.status],
+    [],
+    ["#", "Date", "Planned Activity", "Expected Output", "Type", "Status"],
+    ...plan.rows.map((row) => [
+      row.serialNo,
+      row.workDate,
+      row.activity,
+      row.expectedOutput,
+      row.rowType,
+      row.rowStatus,
+    ]),
+    [],
+    ["Travel Plan"],
+    ["#", "Travel Date", "Destination", "Purpose", "Expected Output", "Status"],
+    ...plan.travelRows.map((row) => [
+      row.serialNo,
+      row.travelDate,
+      row.destination,
+      row.purpose,
+      row.expectedOutput,
+      row.status,
+    ]),
+  ];
+
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet["!cols"] = [
+    { wch: 6 },
+    { wch: 14 },
+    { wch: 42 },
+    { wch: 28 },
+    { wch: 18 },
+    { wch: 16 },
+  ];
+  worksheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Work Plan");
+  return XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+}
+
+function createDocTable(title: string, headers: string[], items: MonthlyReportItem[]) {
+  return [
+    new Paragraph({
+      text: title,
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 200, after: 120 },
+    }),
+    new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: headers.map(
+            (header) =>
+              new TableCell({
+                children: [
+                  new Paragraph({
+                    children: [new TextRun({ text: header, bold: true })],
+                    alignment: AlignmentType.CENTER,
+                  }),
+                ],
+              }),
+          ),
+        }),
+        ...(items.length
+          ? items.map(
+              (item, index) =>
+                new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph(String(index + 1))] }),
+                    new TableCell({ children: [new Paragraph(item.title)] }),
+                    new TableCell({ children: [new Paragraph(item.output)] }),
+                    new TableCell({ children: [new Paragraph(item.referenceDate || item.remarks)] }),
+                  ],
+                }),
+            )
+          : [
+              new TableRow({
+                children: [
+                  new TableCell({ children: [new Paragraph("No items")], columnSpan: 4 }),
+                  new TableCell({ children: [] }),
+                  new TableCell({ children: [] }),
+                  new TableCell({ children: [] }),
+                ],
+              }),
+            ]),
+      ],
+      borders: {
+        top: { style: BorderStyle.SINGLE, size: 1, color: "A7C6C0" },
+        bottom: { style: BorderStyle.SINGLE, size: 1, color: "A7C6C0" },
+        left: { style: BorderStyle.SINGLE, size: 1, color: "A7C6C0" },
+        right: { style: BorderStyle.SINGLE, size: 1, color: "A7C6C0" },
+        insideHorizontal: { style: BorderStyle.SINGLE, size: 1, color: "D5E3E0" },
+        insideVertical: { style: BorderStyle.SINGLE, size: 1, color: "D5E3E0" },
+      },
+    }),
+  ];
+}
+
+async function exportMonthlyReportDocx(report: MonthlyReport) {
+  const document = new Document({
+    sections: [
+      {
+        children: [
+          new Paragraph({
+            text: "PRAAN Monthly Report",
+            heading: HeadingLevel.TITLE,
+            alignment: AlignmentType.CENTER,
+          }),
+          new Paragraph({
+            children: [
+              new TextRun({ text: "Project: ", bold: true }),
+              new TextRun(report.projectName),
+            ],
+          }),
+          new Paragraph({
+            children: [
+              new TextRun({ text: "Name: ", bold: true }),
+              new TextRun(report.employeeName),
+              new TextRun({ text: "    Designation: ", bold: true }),
+              new TextRun(report.designation),
+            ],
+          }),
+          new Paragraph({
+            children: [
+              new TextRun({ text: "Reporting Month: ", bold: true }),
+              new TextRun(`${String(report.month).padStart(2, "0")}/${report.year}`),
+              new TextRun({ text: "    Submission Date: ", bold: true }),
+              new TextRun(report.submissionDate),
+            ],
+            spacing: { after: 200 },
+          }),
+          ...createDocTable("Completed Tasks", ["#", "Name of the Task", "Output", "Remark / Date"], report.completedTasks),
+          ...createDocTable("Ongoing Tasks", ["#", "Name of the Task", "Output", "Deadline"], report.ongoingTasks),
+          ...createDocTable("Tasks for Next Month", ["#", "Name of the Task", "Output", "Date"], report.nextMonthTasks),
+          new Paragraph({
+            text: "Lesson Learned",
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 200, after: 80 },
+          }),
+          new Paragraph(report.lessonsLearned || ""),
+          new Paragraph({
+            text: "Comments",
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 200, after: 80 },
+          }),
+          new Paragraph(report.comments || ""),
+        ],
+      },
+    ],
+  });
+
+  return Packer.toArrayBuffer(document);
+}
+
+function wrapText(text: string, maxChars: number) {
+  if (!text) return [""];
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > maxChars && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines;
+}
+
+async function exportMonthlyReportPdf(report: MonthlyReport) {
+  const pdf = await PDFDocument.create();
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  let page = pdf.addPage([595.28, 841.89]);
+  let y = 805;
+  const x = 40;
+  const fontSize = 10;
+  const lineHeight = 14;
+  const maxChars = 78;
+
+  const addPage = () => {
+    page = pdf.addPage([595.28, 841.89]);
+    y = 805;
+  };
+
+  const ensureSpace = (lines = 1) => {
+    if (y - lines * lineHeight < 40) {
+      addPage();
+    }
+  };
+
+  const drawLine = (text: string, font = regular, size = fontSize, color = rgb(0.09, 0.21, 0.24)) => {
+    ensureSpace();
+    page.drawText(text, { x, y, size, font, color });
+    y -= lineHeight;
+  };
+
+  const drawBlock = (title: string, items: MonthlyReportItem[]) => {
+    ensureSpace(3);
+    drawLine(title, bold, 12);
+    if (!items.length) {
+      drawLine("No items");
+      y -= 4;
+      return;
+    }
+
+    items.forEach((item, index) => {
+      const text = `${index + 1}. ${item.title} | ${item.output} | ${item.referenceDate || item.remarks}`;
+      for (const line of wrapText(text, maxChars)) {
+        drawLine(line);
+      }
+      y -= 2;
+    });
+  };
+
+  drawLine("PRAAN Monthly Report", bold, 16);
+  drawLine(`Project: ${report.projectName}`);
+  drawLine(`Name: ${report.employeeName}`);
+  drawLine(`Designation: ${report.designation}`);
+  drawLine(`Reporting Month: ${String(report.month).padStart(2, "0")}/${report.year}`);
+  drawLine(`Submission Date: ${report.submissionDate}`);
+  y -= 4;
+
+  drawBlock("Completed Tasks", report.completedTasks);
+  drawBlock("Ongoing Tasks", report.ongoingTasks);
+  drawBlock("Tasks for Next Month", report.nextMonthTasks);
+  drawLine("Lesson Learned", bold, 12);
+  wrapText(report.lessonsLearned || "", maxChars).forEach((line) => drawLine(line));
+  drawLine("Comments", bold, 12);
+  wrapText(report.comments || "", maxChars).forEach((line) => drawLine(line));
+
+  return pdf.save();
+}
+
+async function exportDailySheetPdf(sheet: DailySheet, user: UserSession) {
+  const pdf = await PDFDocument.create();
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  let page = pdf.addPage([595.28, 841.89]);
+  let y = 805;
+  const x = 36;
+  const lineHeight = 14;
+
+  const addPage = () => {
+    page = pdf.addPage([595.28, 841.89]);
+    y = 805;
+  };
+
+  const draw = (text: string, font = regular, size = 10) => {
+    if (y < 50) addPage();
+    page.drawText(text, { x, y, size, font, color: rgb(0.07, 0.21, 0.24) });
+    y -= lineHeight;
+  };
+
+  draw("PRAAN Daily Activity Register", bold, 16);
+  draw(`${user.fullName} | ${user.designation}`);
+  draw(`Date: ${sheet.workDate}`);
+  y -= 4;
+  draw("Time | Task | Output | Delivery", bold, 11);
+  sheet.rows.forEach((row) => {
+    const line = `${row.startTime}-${row.endTime} | ${row.linkLabel ?? row.actualActivity} | ${row.actualOutput} | ${
+      row.deliveryDone ? "Done" : row.deliveryRequired ? "Pending" : "-"
+    }`;
+    wrapText(line, 84).forEach((part) => draw(part));
+    y -= 2;
+  });
+  y -= 4;
+  draw("Note", bold, 11);
+  wrapText(sheet.note || "", 84).forEach((part) => draw(part));
+
+  return pdf.save();
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1381,6 +2226,183 @@ export default {
       );
     }
 
+    if (url.pathname === "/api/monthly-reports/current" && request.method === "GET") {
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      return json(await ensureMonthlyReport(env, user, month, year));
+    }
+
+    const monthlyReportMatch = matchRoute(url.pathname, /^\/api\/monthly-reports\/([^/]+)$/);
+    if (monthlyReportMatch && request.method === "PATCH") {
+      const reportId = monthlyReportMatch[1];
+      const report = await env.DB.prepare(
+        `
+          SELECT
+            id,
+            user_id,
+            month,
+            year,
+            version_no,
+            report_status,
+            project_name_snapshot,
+            designation_snapshot,
+            submission_date,
+            completed_tasks_snapshot_json,
+            ongoing_tasks_snapshot_json,
+            next_month_tasks_snapshot_json,
+            lessons_learned,
+            comments
+          FROM monthly_reports
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(reportId, user.id)
+        .first<MonthlyReportRecord>();
+
+      if (!report) return error("Monthly report not found.", 404);
+
+      const body = await parseJson<{
+        submissionDate: string;
+        completedTasks: MonthlyReportItem[];
+        ongoingTasks: MonthlyReportItem[];
+        nextMonthTasks: MonthlyReportItem[];
+        lessonsLearned: string;
+        comments: string;
+      }>(request);
+
+      await env.DB.prepare(
+        `
+          UPDATE monthly_reports
+          SET
+            submission_date = ?,
+            completed_tasks_snapshot_json = ?,
+            ongoing_tasks_snapshot_json = ?,
+            next_month_tasks_snapshot_json = ?,
+            lessons_learned = ?,
+            comments = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+        .bind(
+          body.submissionDate,
+          JSON.stringify(body.completedTasks),
+          JSON.stringify(body.ongoingTasks),
+          JSON.stringify(body.nextMonthTasks),
+          body.lessonsLearned,
+          body.comments,
+          reportId,
+        )
+        .run();
+
+      const latest = await findMonthlyReportRecord(env, user.id, report.month, report.year);
+      if (!latest) return error("Unable to reload monthly report.", 500);
+      return json(await hydrateMonthlyReport(env, latest, user));
+    }
+
+    const regenerateReportMatch = matchRoute(url.pathname, /^\/api\/monthly-reports\/([^/]+)\/regenerate$/);
+    if (regenerateReportMatch && request.method === "POST") {
+      const reportId = regenerateReportMatch[1];
+      const report = await env.DB.prepare(
+        `
+          SELECT
+            id,
+            user_id,
+            month,
+            year,
+            version_no,
+            report_status,
+            project_name_snapshot,
+            designation_snapshot,
+            submission_date,
+            completed_tasks_snapshot_json,
+            ongoing_tasks_snapshot_json,
+            next_month_tasks_snapshot_json,
+            lessons_learned,
+            comments
+          FROM monthly_reports
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(reportId, user.id)
+        .first<MonthlyReportRecord>();
+
+      if (!report) return error("Monthly report not found.", 404);
+
+      const draft = await buildMonthlyReportDraft(env, user, report.month, report.year);
+      await env.DB.prepare(
+        `
+          UPDATE monthly_reports
+          SET
+            submission_date = ?,
+            completed_tasks_snapshot_json = ?,
+            ongoing_tasks_snapshot_json = ?,
+            next_month_tasks_snapshot_json = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+        .bind(
+          draft.submissionDate,
+          JSON.stringify(draft.completedTasks),
+          JSON.stringify(draft.ongoingTasks),
+          JSON.stringify(draft.nextMonthTasks),
+          reportId,
+        )
+        .run();
+
+      const latest = await findMonthlyReportRecord(env, user.id, report.month, report.year);
+      if (!latest) return error("Unable to reload monthly report.", 500);
+      return json(await hydrateMonthlyReport(env, latest, user));
+    }
+
+    const submitReportMatch = matchRoute(url.pathname, /^\/api\/monthly-reports\/([^/]+)\/submit$/);
+    if (submitReportMatch && request.method === "POST") {
+      const reportId = submitReportMatch[1];
+      const report = await env.DB.prepare(
+        `
+          SELECT
+            id,
+            user_id,
+            month,
+            year,
+            version_no,
+            report_status,
+            project_name_snapshot,
+            designation_snapshot,
+            submission_date,
+            completed_tasks_snapshot_json,
+            ongoing_tasks_snapshot_json,
+            next_month_tasks_snapshot_json,
+            lessons_learned,
+            comments
+          FROM monthly_reports
+          WHERE id = ? AND user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(reportId, user.id)
+        .first<MonthlyReportRecord>();
+
+      if (!report) return error("Monthly report not found.", 404);
+
+      await env.DB.prepare(
+        `
+          UPDATE monthly_reports
+          SET report_status = 'submitted', submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+        .bind(reportId)
+        .run();
+
+      const latest = await findMonthlyReportRecord(env, user.id, report.month, report.year);
+      if (!latest) return error("Unable to reload monthly report.", 500);
+      return json(await hydrateMonthlyReport(env, latest, user));
+    }
+
     if (url.pathname === "/api/daily-sheets/current" && request.method === "GET") {
       const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
       const record = await ensureDailySheetRecord(env, user, workDate);
@@ -1689,6 +2711,70 @@ export default {
       }
 
       return json({ success: true });
+    }
+
+    if (url.pathname === "/api/exports/work-plans/current.xlsx" && request.method === "GET") {
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const plan = await ensurePlan(env, user, month, year);
+      const workbook = await exportWorkPlanWorkbook(plan);
+      return fileResponse(
+        workbook,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        `work-plan-${year}-${String(month).padStart(2, "0")}.xlsx`,
+      );
+    }
+
+    if (url.pathname === "/api/exports/monthly-reports/current.docx" && request.method === "GET") {
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const report = await ensureMonthlyReport(env, user, month, year);
+      const buffer = await exportMonthlyReportDocx(report);
+      return fileResponse(
+        buffer,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        `monthly-report-${year}-${String(month).padStart(2, "0")}.docx`,
+      );
+    }
+
+    if (url.pathname === "/api/exports/monthly-reports/current.pdf" && request.method === "GET") {
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const report = await ensureMonthlyReport(env, user, month, year);
+      const pdf = await exportMonthlyReportPdf(report);
+      return fileResponse(pdf, "application/pdf", `monthly-report-${year}-${String(month).padStart(2, "0")}.pdf`);
+    }
+
+    if (url.pathname === "/api/exports/monthly-reports/current.print" && request.method === "GET") {
+      const month = Number(url.searchParams.get("month") ?? 3);
+      const year = Number(url.searchParams.get("year") ?? 2026);
+      const report = await ensureMonthlyReport(env, user, month, year);
+      return new Response(renderMonthlyReportPrintHtml(report), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/exports/daily-sheets/current.pdf" && request.method === "GET") {
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+      const record = await ensureDailySheetRecord(env, user, workDate);
+      const sheet = await hydrateDailySheet(env, record, user);
+      const pdf = await exportDailySheetPdf(sheet, user);
+      return fileResponse(pdf, "application/pdf", `daily-sheet-${workDate}.pdf`);
+    }
+
+    if (url.pathname === "/api/exports/daily-sheets/current.print" && request.method === "GET") {
+      const workDate = url.searchParams.get("date") ?? currentDateInTimeZone(env.APP_TIMEZONE ?? "Asia/Dhaka");
+      const record = await ensureDailySheetRecord(env, user, workDate);
+      const sheet = await hydrateDailySheet(env, record, user);
+      return new Response(renderDailySheetPrintHtml(sheet, user), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
     }
 
     return env.ASSETS.fetch(request);
