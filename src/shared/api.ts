@@ -1,5 +1,6 @@
 import type {
   ApiResponse,
+  DailyAttachment,
   DailyActivityRow,
   DailyActivityRowInput,
   DailySheet,
@@ -39,6 +40,30 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<ApiRes
       "content-type": "application/json",
       ...(init?.headers ?? {}),
     },
+    ...init,
+  });
+
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+
+    try {
+      const payload = (await response.json()) as { error?: string };
+      if (payload.error) {
+        message = payload.error;
+      }
+    } catch {
+      // Ignore invalid JSON error bodies.
+    }
+
+    throw new ApiError(message, response.status);
+  }
+
+  return (await response.json()) as ApiResponse<T>;
+}
+
+async function requestFormData<T>(input: string, init: RequestInit): Promise<ApiResponse<T>> {
+  const response = await fetch(input, {
+    credentials: "same-origin",
     ...init,
   });
 
@@ -169,6 +194,22 @@ export function updateDailyActivityRow(sheetId: string, rowId: string, input: Da
 
 export function deleteDailyActivityRow(sheetId: string, rowId: string) {
   return requestJson<{ success: true }>(`/api/daily-sheets/${sheetId}/rows/${rowId}`, {
+    method: "DELETE",
+  });
+}
+
+export function uploadDailyRowAttachment(sheetId: string, rowId: string, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return requestFormData<DailyAttachment>(`/api/daily-sheets/${sheetId}/rows/${rowId}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export function deleteDailyRowAttachment(attachmentId: string) {
+  return requestJson<{ success: true }>(`/api/daily-attachments/${attachmentId}`, {
     method: "DELETE",
   });
 }

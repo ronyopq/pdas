@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addDailyActivityRow,
   deleteDailyActivityRow,
+  deleteDailyRowAttachment,
   fetchCurrentDailySheet,
   fetchPendingItems,
   submitDailySheet,
   updateDailyActivityRow,
   updateDailySheet,
+  uploadDailyRowAttachment,
 } from "../../shared/api";
 import type {
   CarryForwardAction,
@@ -61,13 +63,10 @@ function emptyNewRow(): DailyActivityRowInput {
     adHocReason: "",
     carryForwardAction: "none",
     rowNote: "",
+    followUpPerson: "",
+    followUpDate: "",
+    followUpNote: "",
   };
-}
-
-function buildSelection(row: DailyActivityRow) {
-  if (row.linkedPlanRowId) return `plan:${row.linkedPlanRowId}`;
-  if (row.linkedTravelRowId) return `travel:${row.linkedTravelRowId}`;
-  return "adhoc";
 }
 
 function applySelection(input: DailyActivityRowInput, selection: string): DailyActivityRowInput {
@@ -104,6 +103,7 @@ export function TodayPage() {
   const [sheet, setSheet] = useState<DailySheet | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [uploadingRowId, setUploadingRowId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sheetNote, setSheetNote] = useState("");
   const [newRow, setNewRow] = useState<DailyActivityRowInput>(emptyNewRow());
@@ -123,16 +123,24 @@ export function TodayPage() {
   }, [workDate]);
 
   const stats = useMemo(() => {
-    const rowCount = sheet?.rows.length ?? 0;
-    const linkedCount =
-      sheet?.rows.filter((row) => Boolean(row.linkedPlanRowId) || Boolean(row.linkedTravelRowId)).length ?? 0;
-
+    const rows = sheet?.rows ?? [];
     return {
-      rowCount,
-      linkedCount,
-      optionCount: sheet?.taskOptions.length ?? 0,
+      rowCount: rows.length,
+      followUpCount: rows.filter((row) => row.isFollowUpGenerated || Boolean(row.followUpDate)).length,
+      attachmentCount: rows.reduce((sum, row) => sum + row.attachments.length, 0),
     };
   }, [sheet]);
+
+  function updateLocalRow(rowId: string, patch: Partial<DailyActivityRow>) {
+    setSheet((current) =>
+      current
+        ? {
+            ...current,
+            rows: current.rows.map((entry) => (entry.id === rowId ? { ...entry, ...patch } : entry)),
+          }
+        : current,
+    );
+  }
 
   async function saveNote() {
     if (!sheet) return;
@@ -191,6 +199,9 @@ export function TodayPage() {
         adHocReason: row.adHocReason,
         carryForwardAction: row.carryForwardAction,
         rowNote: row.rowNote,
+        followUpPerson: row.followUpPerson,
+        followUpDate: row.followUpDate,
+        followUpNote: row.followUpNote,
       });
       setSheet((current) =>
         current
@@ -243,6 +254,40 @@ export function TodayPage() {
     }
   }
 
+  async function uploadAttachment(rowId: string, file: File | null) {
+    if (!sheet || !file) return;
+
+    setUploadingRowId(rowId);
+    setError(null);
+    try {
+      const result = await uploadDailyRowAttachment(sheet.id, rowId, file);
+      updateLocalRow(rowId, {
+        attachments: [...(sheet.rows.find((row) => row.id === rowId)?.attachments ?? []), result.data],
+      });
+    } catch {
+      setError("Unable to upload attachment. Only .docx and .xlsx are allowed.");
+    } finally {
+      setUploadingRowId(null);
+    }
+  }
+
+  async function removeAttachment(rowId: string, attachmentId: string) {
+    setUploadingRowId(rowId);
+    setError(null);
+    try {
+      await deleteDailyRowAttachment(attachmentId);
+      updateLocalRow(rowId, {
+        attachments: (sheet?.rows.find((row) => row.id === rowId)?.attachments ?? []).filter(
+          (attachment) => attachment.id !== attachmentId,
+        ),
+      });
+    } catch {
+      setError("Unable to delete attachment.");
+    } finally {
+      setUploadingRowId(null);
+    }
+  }
+
   if (loading) {
     return <section className="page-card">Loading daily sheet...</section>;
   }
@@ -258,7 +303,7 @@ export function TodayPage() {
           <div className="section-heading">
             <h3>Daily activity</h3>
             <p>
-              Link daily work to today&apos;s planned tasks and pending items. Status:{" "}
+              Record each activity with time, note, follow-up, and office document support. Status:{" "}
               <strong>{sheet.status}</strong>
             </p>
           </div>
@@ -282,12 +327,12 @@ export function TodayPage() {
             <input value={String(stats.rowCount)} disabled />
           </label>
           <label>
-            <span>Linked Rows</span>
-            <input value={String(stats.linkedCount)} disabled />
+            <span>Follow-ups</span>
+            <input value={String(stats.followUpCount)} disabled />
           </label>
           <label>
-            <span>Available Task Links</span>
-            <input value={String(stats.optionCount)} disabled />
+            <span>Attachments</span>
+            <input value={String(stats.attachmentCount)} disabled />
           </label>
           <label>
             <span>Pending Count</span>
@@ -306,7 +351,7 @@ export function TodayPage() {
       <section className="page-card">
         <div className="section-heading">
           <h3>Task options</h3>
-          <p>These come from today&apos;s plan rows, open carry-forward items and travel tasks.</p>
+          <p>These come from today&apos;s work plan and open carry-forward items.</p>
         </div>
         <ul className="stack-list">
           {sheet.taskOptions.map((option) => (
@@ -321,320 +366,342 @@ export function TodayPage() {
 
       <section className="page-card">
         <div className="section-heading">
-          <h3>Daily rows</h3>
-          <p>Each row saves directly to D1 through the Worker API.</p>
+          <h3>Activity rows</h3>
+          <p>Follow-up dates auto-create a new row on the due date and appear in the sticky reminder area.</p>
         </div>
 
-        <div className="table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Linked Task</th>
-                <th>Actual Activity</th>
-                <th>Output</th>
-                <th>Status</th>
-                <th>Flags</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sheet.rows.map((row) => (
-                <tr key={row.id}>
-                  <td>
-                    <div className="stack-field">
-                      <input
-                        type="time"
-                        value={row.startTime}
-                        onChange={(event) =>
-                          setSheet((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  rows: current.rows.map((entry) =>
-                                    entry.id === row.id ? { ...entry, startTime: event.target.value } : entry,
-                                  ),
-                                }
-                              : current,
-                          )
-                        }
-                      />
-                      <input
-                        type="time"
-                        value={row.endTime}
-                        onChange={(event) =>
-                          setSheet((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  rows: current.rows.map((entry) =>
-                                    entry.id === row.id ? { ...entry, endTime: event.target.value } : entry,
-                                  ),
-                                }
-                              : current,
-                          )
-                        }
-                      />
-                    </div>
-                  </td>
-                  <td>
-                    <textarea value={row.linkLabel ?? "Ad hoc"} disabled />
-                  </td>
-                  <td>
-                    <textarea
-                      value={row.actualActivity}
-                      onChange={(event) =>
-                        setSheet((current) =>
-                          current
-                            ? {
-                                ...current,
-                                rows: current.rows.map((entry) =>
-                                  entry.id === row.id ? { ...entry, actualActivity: event.target.value } : entry,
-                                ),
-                              }
-                            : current,
-                        )
-                      }
-                    />
-                  </td>
-                  <td>
-                    <textarea
-                      value={row.actualOutput}
-                      onChange={(event) =>
-                        setSheet((current) =>
-                          current
-                            ? {
-                                ...current,
-                                rows: current.rows.map((entry) =>
-                                  entry.id === row.id ? { ...entry, actualOutput: event.target.value } : entry,
-                                ),
-                              }
-                            : current,
-                        )
-                      }
-                    />
-                  </td>
-                  <td>
-                    <div className="stack-field">
-                      <select
-                        value={row.status}
-                        onChange={(event) =>
-                          setSheet((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  rows: current.rows.map((entry) =>
-                                    entry.id === row.id
-                                      ? { ...entry, status: event.target.value as DailyActivityRow["status"] }
-                                      : entry,
-                                  ),
-                                }
-                              : current,
-                          )
-                        }
-                      >
-                        {activityStatusOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        value={row.carryForwardAction}
-                        onChange={(event) =>
-                          setSheet((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  rows: current.rows.map((entry) =>
-                                    entry.id === row.id
-                                      ? {
-                                          ...entry,
-                                          carryForwardAction: event.target.value as DailyActivityRow["carryForwardAction"],
-                                        }
-                                      : entry,
-                                  ),
-                                }
-                              : current,
-                          )
-                        }
-                      >
-                        {carryForwardOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="check-stack">
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={row.deliveryRequired}
-                          onChange={(event) =>
-                            setSheet((current) =>
-                              current
-                                ? {
-                                    ...current,
-                                    rows: current.rows.map((entry) =>
-                                      entry.id === row.id
-                                        ? { ...entry, deliveryRequired: event.target.checked }
-                                        : entry,
-                                    ),
-                                  }
-                                : current,
-                            )
-                          }
-                        />
-                        Delivery needed
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={row.deliveryDone}
-                          onChange={(event) =>
-                            setSheet((current) =>
-                              current
-                                ? {
-                                    ...current,
-                                    rows: current.rows.map((entry) =>
-                                      entry.id === row.id ? { ...entry, deliveryDone: event.target.checked } : entry,
-                                    ),
-                                  }
-                                : current,
-                            )
-                          }
-                        />
-                        Delivered
-                      </label>
-                    </div>
-                  </td>
-                  <td className="action-cell">
-                    <button type="button" className="ghost-button" onClick={() => saveRow(row)} disabled={saving}>
-                      Save
-                    </button>
-                    <button type="button" className="ghost-button danger" onClick={() => removeRow(row.id)} disabled={saving}>
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              <tr>
-                <td>
-                  <div className="stack-field">
-                    <input
-                      type="time"
-                      value={newRow.startTime}
-                      onChange={(event) => setNewRow((current) => ({ ...current, startTime: event.target.value }))}
-                    />
-                    <input
-                      type="time"
-                      value={newRow.endTime}
-                      onChange={(event) => setNewRow((current) => ({ ...current, endTime: event.target.value }))}
-                    />
-                  </div>
-                </td>
-                <td>
-                  <select value={newSelection} onChange={(event) => setNewSelection(event.target.value)}>
-                    <option value="adhoc">Ad hoc</option>
-                    {sheet.taskOptions.map((option) => (
-                      <option key={`${option.kind}:${option.id}`} value={`${option.kind}:${option.id}`}>
-                        {option.label}
+        <div className="daily-row-stack">
+          {sheet.rows.map((row) => (
+            <article key={row.id} className="daily-row-card">
+              <div className="daily-row-head">
+                <div>
+                  <strong>{row.linkLabel ?? "Direct activity"}</strong>
+                  <span>
+                    {row.startTime} - {row.endTime}
+                  </span>
+                </div>
+                <div className="toolbar-actions">
+                  {row.isFollowUpGenerated ? (
+                    <span className="badge-chip">
+                      Follow-up from {row.followUpSourceDate ?? "previous day"}
+                    </span>
+                  ) : null}
+                  <select
+                    value={row.status}
+                    onChange={(event) =>
+                      updateLocalRow(row.id, { status: event.target.value as DailyActivityRow["status"] })
+                    }
+                  >
+                    {activityStatusOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
                       </option>
                     ))}
                   </select>
-                  {newSelection === "adhoc" ? (
+                </div>
+              </div>
+
+              <div className="daily-row-grid">
+                <label className="stack-field">
+                  <span>Start / End</span>
+                  <div className="inline-pair">
                     <input
-                      value={newRow.adHocReason}
-                      placeholder="Ad hoc reason"
-                      onChange={(event) =>
-                        setNewRow((current) => ({ ...current, adHocReason: event.target.value, isAdHoc: true }))
-                      }
+                      type="time"
+                      value={row.startTime}
+                      onChange={(event) => updateLocalRow(row.id, { startTime: event.target.value })}
                     />
-                  ) : null}
-                </td>
-                <td>
-                  <textarea
-                    value={newRow.actualActivity}
-                    placeholder="What did you do?"
-                    onChange={(event) => setNewRow((current) => ({ ...current, actualActivity: event.target.value }))}
-                  />
-                </td>
-                <td>
-                  <textarea
-                    value={newRow.actualOutput}
-                    placeholder="What was the output?"
-                    onChange={(event) => setNewRow((current) => ({ ...current, actualOutput: event.target.value }))}
-                  />
-                </td>
-                <td>
-                  <div className="stack-field">
-                    <select
-                      value={newRow.status}
-                      onChange={(event) =>
-                        setNewRow((current) => ({
-                          ...current,
-                          status: event.target.value as DailyActivityRow["status"],
-                        }))
-                      }
-                    >
-                      {activityStatusOptions.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={newRow.carryForwardAction}
-                      onChange={(event) =>
-                        setNewRow((current) => ({
-                          ...current,
-                          carryForwardAction: event.target.value as CarryForwardAction,
-                        }))
-                      }
-                    >
-                      {carryForwardOptions.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
+                    <input
+                      type="time"
+                      value={row.endTime}
+                      onChange={(event) => updateLocalRow(row.id, { endTime: event.target.value })}
+                    />
                   </div>
-                </td>
-                <td>
-                  <div className="check-stack">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={newRow.deliveryRequired}
-                        onChange={(event) =>
-                          setNewRow((current) => ({ ...current, deliveryRequired: event.target.checked }))
-                        }
-                      />
-                      Delivery needed
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={newRow.deliveryDone}
-                        onChange={(event) =>
-                          setNewRow((current) => ({ ...current, deliveryDone: event.target.checked }))
-                        }
-                      />
-                      Delivered
-                    </label>
-                  </div>
-                </td>
-                <td className="action-cell">
-                  <button type="button" className="primary-button" onClick={createRow} disabled={saving}>
-                    Add row
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                </label>
+
+                <label className="stack-field">
+                  <span>Activity</span>
+                  <textarea
+                    value={row.actualActivity}
+                    onChange={(event) => updateLocalRow(row.id, { actualActivity: event.target.value })}
+                  />
+                </label>
+
+                <label className="stack-field">
+                  <span>Output</span>
+                  <textarea
+                    value={row.actualOutput}
+                    onChange={(event) => updateLocalRow(row.id, { actualOutput: event.target.value })}
+                  />
+                </label>
+
+                <label className="stack-field">
+                  <span>Notes</span>
+                  <textarea
+                    value={row.rowNote}
+                    onChange={(event) => updateLocalRow(row.id, { rowNote: event.target.value })}
+                  />
+                </label>
+              </div>
+
+              <div className="daily-row-grid details-grid">
+                <label className="stack-field">
+                  <span>Carry forward</span>
+                  <select
+                    value={row.carryForwardAction}
+                    onChange={(event) =>
+                      updateLocalRow(row.id, {
+                        carryForwardAction: event.target.value as DailyActivityRow["carryForwardAction"],
+                      })
+                    }
+                  >
+                    {carryForwardOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="stack-field">
+                  <span>Follow-up person</span>
+                  <input
+                    value={row.followUpPerson}
+                    onChange={(event) => updateLocalRow(row.id, { followUpPerson: event.target.value })}
+                    placeholder="Person responsible"
+                  />
+                </label>
+
+                <label className="stack-field">
+                  <span>Follow-up date</span>
+                  <input
+                    type="date"
+                    value={row.followUpDate}
+                    onChange={(event) => updateLocalRow(row.id, { followUpDate: event.target.value })}
+                  />
+                </label>
+
+                <label className="stack-field">
+                  <span>Follow-up note</span>
+                  <textarea
+                    value={row.followUpNote}
+                    onChange={(event) => updateLocalRow(row.id, { followUpNote: event.target.value })}
+                    placeholder="This will be referenced in the auto-created follow-up activity."
+                  />
+                </label>
+              </div>
+
+              <div className="attachment-panel">
+                <div className="attachment-header">
+                  <strong>Supporting files</strong>
+                  <span>Allowed: .docx, .xlsx</span>
+                </div>
+                <div className="attachment-list">
+                  {row.attachments.map((attachment) => (
+                    <div key={attachment.id} className="attachment-chip">
+                      <a href={attachment.downloadUrl}>{attachment.fileName}</a>
+                      <button
+                        type="button"
+                        className="inline-action"
+                        onClick={() => removeAttachment(row.id, attachment.id)}
+                        disabled={uploadingRowId === row.id}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                  {row.attachments.length === 0 ? <span className="attachment-empty">No file uploaded.</span> : null}
+                </div>
+                <input
+                  type="file"
+                  accept=".docx,.xlsx"
+                  onChange={(event) => uploadAttachment(row.id, event.target.files?.[0] ?? null)}
+                  disabled={uploadingRowId === row.id}
+                />
+              </div>
+
+              <div className="toolbar-actions">
+                <label className="check-inline">
+                  <input
+                    type="checkbox"
+                    checked={row.deliveryRequired}
+                    onChange={(event) => updateLocalRow(row.id, { deliveryRequired: event.target.checked })}
+                  />
+                  Delivery needed
+                </label>
+                <label className="check-inline">
+                  <input
+                    type="checkbox"
+                    checked={row.deliveryDone}
+                    onChange={(event) => updateLocalRow(row.id, { deliveryDone: event.target.checked })}
+                  />
+                  Delivered
+                </label>
+                <button type="button" className="ghost-button" onClick={() => saveRow(row)} disabled={saving}>
+                  Save row
+                </button>
+                <button type="button" className="ghost-button" onClick={() => saveRow(row)} disabled={saving}>
+                  Save follow-up
+                </button>
+                <button type="button" className="ghost-button danger" onClick={() => removeRow(row.id)} disabled={saving}>
+                  Delete
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="page-card">
+        <div className="section-heading">
+          <h3>Add new activity</h3>
+          <p>Create a new time-based row and optionally schedule a follow-up immediately.</p>
+        </div>
+
+        <div className="daily-row-grid">
+          <label className="stack-field">
+            <span>Task source</span>
+            <select value={newSelection} onChange={(event) => setNewSelection(event.target.value)}>
+              <option value="adhoc">Ad hoc</option>
+              {sheet.taskOptions.map((option) => (
+                <option key={`${option.kind}:${option.id}`} value={`${option.kind}:${option.id}`}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {newSelection === "adhoc" ? (
+              <input
+                value={newRow.adHocReason}
+                placeholder="Ad hoc reason"
+                onChange={(event) => setNewRow((current) => ({ ...current, adHocReason: event.target.value, isAdHoc: true }))}
+              />
+            ) : null}
+          </label>
+
+          <label className="stack-field">
+            <span>Start / End</span>
+            <div className="inline-pair">
+              <input
+                type="time"
+                value={newRow.startTime}
+                onChange={(event) => setNewRow((current) => ({ ...current, startTime: event.target.value }))}
+              />
+              <input
+                type="time"
+                value={newRow.endTime}
+                onChange={(event) => setNewRow((current) => ({ ...current, endTime: event.target.value }))}
+              />
+            </div>
+          </label>
+
+          <label className="stack-field">
+            <span>Activity</span>
+            <textarea
+              value={newRow.actualActivity}
+              onChange={(event) => setNewRow((current) => ({ ...current, actualActivity: event.target.value }))}
+              placeholder="What did you do?"
+            />
+          </label>
+
+          <label className="stack-field">
+            <span>Output</span>
+            <textarea
+              value={newRow.actualOutput}
+              onChange={(event) => setNewRow((current) => ({ ...current, actualOutput: event.target.value }))}
+              placeholder="What was the output?"
+            />
+          </label>
+
+          <label className="stack-field">
+            <span>Notes</span>
+            <textarea
+              value={newRow.rowNote}
+              onChange={(event) => setNewRow((current) => ({ ...current, rowNote: event.target.value }))}
+            />
+          </label>
+
+          <label className="stack-field">
+            <span>Status</span>
+            <select
+              value={newRow.status}
+              onChange={(event) =>
+                setNewRow((current) => ({
+                  ...current,
+                  status: event.target.value as DailyActivityRow["status"],
+                }))
+              }
+            >
+              {activityStatusOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="daily-row-grid details-grid">
+          <label className="stack-field">
+            <span>Follow-up person</span>
+            <input
+              value={newRow.followUpPerson}
+              onChange={(event) => setNewRow((current) => ({ ...current, followUpPerson: event.target.value }))}
+            />
+          </label>
+          <label className="stack-field">
+            <span>Follow-up date</span>
+            <input
+              type="date"
+              value={newRow.followUpDate}
+              onChange={(event) => setNewRow((current) => ({ ...current, followUpDate: event.target.value }))}
+            />
+          </label>
+          <label className="stack-field">
+            <span>Follow-up note</span>
+            <textarea
+              value={newRow.followUpNote}
+              onChange={(event) => setNewRow((current) => ({ ...current, followUpNote: event.target.value }))}
+            />
+          </label>
+          <label className="stack-field">
+            <span>Carry forward</span>
+            <select
+              value={newRow.carryForwardAction}
+              onChange={(event) =>
+                setNewRow((current) => ({
+                  ...current,
+                  carryForwardAction: event.target.value as CarryForwardAction,
+                }))
+              }
+            >
+              {carryForwardOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="toolbar-actions">
+          <label className="check-inline">
+            <input
+              type="checkbox"
+              checked={newRow.deliveryRequired}
+              onChange={(event) => setNewRow((current) => ({ ...current, deliveryRequired: event.target.checked }))}
+            />
+            Delivery needed
+          </label>
+          <label className="check-inline">
+            <input
+              type="checkbox"
+              checked={newRow.deliveryDone}
+              onChange={(event) => setNewRow((current) => ({ ...current, deliveryDone: event.target.checked }))}
+            />
+            Delivered
+          </label>
+          <button type="button" className="primary-button" onClick={createRow} disabled={saving}>
+            Add activity
+          </button>
         </div>
       </section>
     </div>

@@ -157,6 +157,15 @@ export interface DailyActivityRow {
   adHocReason: string;
   carryForwardAction: CarryForwardAction;
   rowNote: string;
+  followUpPerson: string;
+  followUpDate: string;
+  followUpNote: string;
+  followUpGeneratedRowId: string | null;
+  followUpSourceRowId: string | null;
+  followUpSourceDate: string | null;
+  followUpSourceActivity: string | null;
+  isFollowUpGenerated: boolean;
+  attachments: DailyAttachment[];
 }
 
 export interface DailySheet {
@@ -183,6 +192,17 @@ export interface DailyActivityRowInput {
   adHocReason: string;
   carryForwardAction: CarryForwardAction;
   rowNote: string;
+  followUpPerson: string;
+  followUpDate: string;
+  followUpNote: string;
+}
+
+export interface DailyAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  downloadUrl: string;
 }
 
 export interface PendingItem {

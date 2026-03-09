@@ -16,6 +16,7 @@ import {
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type {
   ApiResponse,
+  DailyAttachment,
   DailyActivityRow,
   DailyActivityRowInput,
   DailyActivityStatus,
@@ -111,8 +112,37 @@ interface DailyRowRecord {
   ad_hoc_reason: string | null;
   carry_forward_action: DailyActivityRow["carryForwardAction"];
   row_note: string | null;
+  follow_up_person: string | null;
+  follow_up_date: string | null;
+  follow_up_note: string | null;
+  follow_up_generated_row_id: string | null;
+  follow_up_source_row_id: string | null;
+  is_follow_up_generated: number;
+  follow_up_source_activity: string | null;
+  follow_up_source_date: string | null;
   plan_activity: string | null;
   travel_destination: string | null;
+}
+
+interface DailyAttachmentRecord {
+  id: string;
+  daily_activity_row_id: string;
+  file_name: string;
+  mime_type: string;
+  file_size: number;
+}
+
+interface DueFollowUpRecord {
+  id: string;
+  linked_plan_row_id: string | null;
+  linked_travel_row_id: string | null;
+  actual_activity: string;
+  actual_output: string | null;
+  is_ad_hoc: number;
+  ad_hoc_reason: string | null;
+  follow_up_person: string | null;
+  follow_up_note: string | null;
+  source_work_date: string;
 }
 
 interface MonthlyReportRecord {
@@ -408,6 +438,11 @@ function isConstraintError(error: unknown, constraintType: "UNIQUE" | "FOREIGN K
     error instanceof Error &&
     error.message.includes(`${constraintType} constraint failed`)
   );
+}
+
+function isAllowedOfficeAttachment(fileName: string) {
+  const lowerName = fileName.toLowerCase();
+  return lowerName.endsWith(".docx") || lowerName.endsWith(".xlsx");
 }
 
 function navByRole(role: UserRole): NavigationItem[] {
@@ -957,9 +992,19 @@ async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityR
         dar.ad_hoc_reason,
         dar.carry_forward_action,
         dar.row_note,
+        dar.follow_up_person,
+        dar.follow_up_date,
+        dar.follow_up_note,
+        dar.follow_up_generated_row_id,
+        dar.follow_up_source_row_id,
+        dar.is_follow_up_generated,
+        src.actual_activity AS follow_up_source_activity,
+        srcSheet.work_date AS follow_up_source_date,
         pr.planned_activity AS plan_activity,
         tr.destination AS travel_destination
       FROM daily_activity_rows dar
+      LEFT JOIN daily_activity_rows src ON src.id = dar.follow_up_source_row_id
+      LEFT JOIN daily_sheets srcSheet ON srcSheet.id = src.daily_sheet_id
       LEFT JOIN monthly_work_plan_rows pr ON pr.id = dar.linked_plan_row_id
       LEFT JOIN monthly_travel_plan_rows tr ON tr.id = dar.linked_travel_row_id
       WHERE dar.daily_sheet_id = ?
@@ -968,6 +1013,34 @@ async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityR
   )
     .bind(sheetId)
     .all<DailyRowRecord>();
+
+  const attachmentsByRowId = new Map<string, DailyAttachment[]>();
+
+  await Promise.all(
+    rows.results.map(async (row) => {
+      const attachmentResult = await env.DB.prepare(
+        `
+          SELECT id, daily_activity_row_id, file_name, mime_type, file_size
+          FROM daily_row_attachments
+          WHERE daily_activity_row_id = ?
+          ORDER BY uploaded_at ASC
+        `,
+      )
+        .bind(row.id)
+        .all<DailyAttachmentRecord>();
+
+      attachmentsByRowId.set(
+        row.id,
+        attachmentResult.results.map((attachment) => ({
+          id: attachment.id,
+          fileName: attachment.file_name,
+          mimeType: attachment.mime_type,
+          fileSize: attachment.file_size,
+          downloadUrl: `/api/daily-attachments/${attachment.id}/download`,
+        })),
+      );
+    }),
+  );
 
   return rows.results.map((row) => ({
     id: row.id,
@@ -986,12 +1059,132 @@ async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityR
     adHocReason: row.ad_hoc_reason ?? "",
     carryForwardAction: row.carry_forward_action,
     rowNote: row.row_note ?? "",
+    followUpPerson: row.follow_up_person ?? "",
+    followUpDate: row.follow_up_date ?? "",
+    followUpNote: row.follow_up_note ?? "",
+    followUpGeneratedRowId: row.follow_up_generated_row_id,
+    followUpSourceRowId: row.follow_up_source_row_id,
+    followUpSourceDate: row.follow_up_source_date,
+    followUpSourceActivity: row.follow_up_source_activity,
+    isFollowUpGenerated: row.is_follow_up_generated === 1,
+    attachments: attachmentsByRowId.get(row.id) ?? [],
   }));
+}
+
+async function materializeDueFollowUps(env: Env, user: UserSession, sheet: DailySheetRecord) {
+  const dueRows = await env.DB.prepare(
+    `
+      SELECT
+        dar.id,
+        dar.linked_plan_row_id,
+        dar.linked_travel_row_id,
+        dar.actual_activity,
+        dar.actual_output,
+        dar.is_ad_hoc,
+        dar.ad_hoc_reason,
+        dar.follow_up_person,
+        dar.follow_up_note,
+        srcSheet.work_date AS source_work_date
+      FROM daily_activity_rows dar
+      JOIN daily_sheets srcSheet ON srcSheet.id = dar.daily_sheet_id
+      WHERE srcSheet.user_id = ?
+        AND dar.follow_up_date = ?
+        AND COALESCE(dar.follow_up_generated_row_id, '') = ''
+        AND srcSheet.id != ?
+    `,
+  )
+    .bind(user.id, sheet.work_date, sheet.id)
+    .all<DueFollowUpRecord>();
+
+  if (!dueRows.results.length) {
+    return;
+  }
+
+  const serialResult = await env.DB.prepare(
+    `
+      SELECT COALESCE(MAX(line_no), 0) AS last_line
+      FROM daily_activity_rows
+      WHERE daily_sheet_id = ?
+    `,
+  )
+    .bind(sheet.id)
+    .first<{ last_line: number }>();
+
+  let lineNo = (serialResult?.last_line ?? 0) + 1;
+  const statements: D1PreparedStatement[] = [];
+
+  dueRows.results.forEach((row) => {
+    const generatedRowId = crypto.randomUUID();
+    const noteParts = [`Auto-created follow-up from ${row.source_work_date}.`];
+    if (row.follow_up_person) {
+      noteParts.push(`Person: ${row.follow_up_person}.`);
+    }
+    if (row.follow_up_note) {
+      noteParts.push(row.follow_up_note);
+    }
+
+    statements.push(
+      env.DB.prepare(
+        `
+          INSERT INTO daily_activity_rows (
+            id,
+            daily_sheet_id,
+            line_no,
+            linked_plan_row_id,
+            linked_travel_row_id,
+            start_time,
+            end_time,
+            actual_activity,
+            actual_output,
+            status,
+            delivery_required,
+            delivery_done,
+            is_ad_hoc,
+            ad_hoc_reason,
+            carry_forward_action,
+            row_note,
+            follow_up_person,
+            follow_up_date,
+            follow_up_note,
+            follow_up_generated_row_id,
+            follow_up_source_row_id,
+            is_follow_up_generated
+          ) VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 'not_started', 0, 0, ?, ?, 'none', ?, '', '', '', NULL, ?, 1)
+        `,
+      ).bind(
+        generatedRowId,
+        sheet.id,
+        lineNo++,
+        row.linked_plan_row_id,
+        row.linked_travel_row_id,
+        `Follow-up: ${row.actual_activity}`,
+        row.actual_output ?? "",
+        row.is_ad_hoc,
+        row.ad_hoc_reason ?? "",
+        noteParts.join(" "),
+        row.id,
+      ),
+    );
+    statements.push(
+      env.DB.prepare(
+        `
+          UPDATE daily_activity_rows
+          SET follow_up_generated_row_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      ).bind(generatedRowId, row.id),
+    );
+  });
+
+  if (statements.length) {
+    await env.DB.batch(statements);
+  }
 }
 
 async function hydrateDailySheet(env: Env, record: DailySheetRecord, user: UserSession): Promise<DailySheet> {
   const { month, year } = monthYearFromDate(record.work_date);
   const plan = await ensurePlan(env, user, month, year);
+  await materializeDueFollowUps(env, user, record);
   const [rows, taskOptions] = await Promise.all([
     fetchDailyRows(env, record.id),
     fetchTaskOptions(env, plan.id, record.work_date),
@@ -2966,8 +3159,14 @@ export default {
             is_ad_hoc,
             ad_hoc_reason,
             carry_forward_action,
-            row_note
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            row_note,
+            follow_up_person,
+            follow_up_date,
+            follow_up_note,
+            follow_up_generated_row_id,
+            follow_up_source_row_id,
+            is_follow_up_generated
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
         `,
       )
         .bind(
@@ -2987,6 +3186,9 @@ export default {
           body.adHocReason,
           body.carryForwardAction,
           body.rowNote,
+          body.followUpPerson,
+          body.followUpDate,
+          body.followUpNote,
         )
         .run();
 
@@ -3021,14 +3223,14 @@ export default {
 
       const existing = await env.DB.prepare(
         `
-          SELECT linked_plan_row_id, linked_travel_row_id
+          SELECT linked_plan_row_id, linked_travel_row_id, follow_up_source_row_id
           FROM daily_activity_rows
           WHERE id = ? AND daily_sheet_id = ?
           LIMIT 1
         `,
       )
         .bind(rowId, sheetId)
-        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null }>();
+        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null; follow_up_source_row_id: string | null }>();
 
       if (!existing) return error("Daily activity row not found.", 404);
 
@@ -3054,6 +3256,9 @@ export default {
             ad_hoc_reason = ?,
             carry_forward_action = ?,
             row_note = ?,
+            follow_up_person = ?,
+            follow_up_date = ?,
+            follow_up_note = ?,
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND daily_sheet_id = ?
         `,
@@ -3072,6 +3277,9 @@ export default {
           body.adHocReason,
           body.carryForwardAction,
           body.rowNote,
+          body.followUpPerson,
+          body.followUpDate,
+          body.followUpNote,
           rowId,
           sheetId,
         )
@@ -3107,16 +3315,28 @@ export default {
 
       const existing = await env.DB.prepare(
         `
-          SELECT linked_plan_row_id, linked_travel_row_id
+          SELECT linked_plan_row_id, linked_travel_row_id, follow_up_source_row_id
           FROM daily_activity_rows
           WHERE id = ? AND daily_sheet_id = ?
           LIMIT 1
         `,
       )
         .bind(rowId, sheetId)
-        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null }>();
+        .first<{ linked_plan_row_id: string | null; linked_travel_row_id: string | null; follow_up_source_row_id: string | null }>();
 
       if (!existing) return error("Daily activity row not found.", 404);
+
+      if (existing.follow_up_source_row_id) {
+        await env.DB.prepare(
+          `
+            UPDATE daily_activity_rows
+            SET follow_up_generated_row_id = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `,
+        )
+          .bind(existing.follow_up_source_row_id)
+          .run();
+      }
 
       await env.DB.prepare(
         `
@@ -3133,6 +3353,126 @@ export default {
         oldTravelId: existing.linked_travel_row_id,
         newTravelId: null,
       });
+
+      return json({ success: true });
+    }
+
+    const dailyAttachmentMatch = matchRoute(url.pathname, /^\/api\/daily-sheets\/([^/]+)\/rows\/([^/]+)\/attachments$/);
+    if (dailyAttachmentMatch && request.method === "POST") {
+      const [, sheetId, rowId] = dailyAttachmentMatch;
+      const row = await env.DB.prepare(
+        `
+          SELECT dar.id
+          FROM daily_activity_rows dar
+          JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+          WHERE dar.id = ? AND ds.id = ? AND ds.user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(rowId, sheetId, user.id)
+        .first<{ id: string }>();
+
+      if (!row) return error("Daily activity row not found.", 404);
+
+      const formData = await request.formData();
+      const uploaded = formData.get("file");
+      if (!(uploaded instanceof File)) {
+        return error("Upload a .docx or .xlsx file.", 400);
+      }
+
+      if (!isAllowedOfficeAttachment(uploaded.name)) {
+        return error("Only .docx and .xlsx files are allowed.", 400);
+      }
+
+      const fileSize = uploaded.size ?? 0;
+      if (fileSize > 5 * 1024 * 1024) {
+        return error("Attachment must be 5 MB or smaller.", 400);
+      }
+
+      const attachmentId = crypto.randomUUID();
+      await env.DB.prepare(
+        `
+          INSERT INTO daily_row_attachments (
+            id,
+            daily_activity_row_id,
+            file_name,
+            mime_type,
+            file_size,
+            file_blob,
+            uploaded_by_user_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+        .bind(
+          attachmentId,
+          rowId,
+          uploaded.name,
+          uploaded.type || "application/octet-stream",
+          fileSize,
+          new Uint8Array(await uploaded.arrayBuffer()),
+          user.id,
+        )
+        .run();
+
+      return json(
+        {
+          id: attachmentId,
+          fileName: uploaded.name,
+          mimeType: uploaded.type || "application/octet-stream",
+          fileSize,
+          downloadUrl: `/api/daily-attachments/${attachmentId}/download`,
+        } satisfies DailyAttachment,
+        { status: 201 },
+      );
+    }
+
+    const attachmentDownloadMatch = matchRoute(url.pathname, /^\/api\/daily-attachments\/([^/]+)\/download$/);
+    if (attachmentDownloadMatch && request.method === "GET") {
+      const attachmentId = attachmentDownloadMatch[1];
+      const attachment = await env.DB.prepare(
+        `
+          SELECT dra.file_name, dra.mime_type, dra.file_blob
+          FROM daily_row_attachments dra
+          JOIN daily_activity_rows dar ON dar.id = dra.daily_activity_row_id
+          JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+          WHERE dra.id = ? AND ds.user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(attachmentId, user.id)
+        .first<{ file_name: string; mime_type: string; file_blob: ArrayBuffer }>();
+
+      if (!attachment) return error("Attachment not found.", 404);
+
+      return fileResponse(attachment.file_blob, attachment.mime_type, attachment.file_name);
+    }
+
+    const attachmentDeleteMatch = matchRoute(url.pathname, /^\/api\/daily-attachments\/([^/]+)$/);
+    if (attachmentDeleteMatch && request.method === "DELETE") {
+      const attachmentId = attachmentDeleteMatch[1];
+      const attachment = await env.DB.prepare(
+        `
+          SELECT dra.id
+          FROM daily_row_attachments dra
+          JOIN daily_activity_rows dar ON dar.id = dra.daily_activity_row_id
+          JOIN daily_sheets ds ON ds.id = dar.daily_sheet_id
+          WHERE dra.id = ? AND ds.user_id = ?
+          LIMIT 1
+        `,
+      )
+        .bind(attachmentId, user.id)
+        .first<{ id: string }>();
+
+      if (!attachment) return error("Attachment not found.", 404);
+
+      await env.DB.prepare(
+        `
+          DELETE FROM daily_row_attachments
+          WHERE id = ?
+        `,
+      )
+        .bind(attachmentId)
+        .run();
 
       return json({ success: true });
     }

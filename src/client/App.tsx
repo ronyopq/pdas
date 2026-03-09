@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "./auth/AuthContext";
-import { fetchDashboard, fetchPendingItems } from "../shared/api";
-import type { DashboardPayload, PendingItem } from "../shared/domain";
+import { fetchCurrentDailySheet, fetchDashboard, fetchPendingItems } from "../shared/api";
+import type { DailyActivityRow, DashboardPayload, PendingItem } from "../shared/domain";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ExportPage } from "./pages/ExportPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -143,6 +143,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<PrimaryTab>("dashboard");
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [pending, setPending] = useState<PendingItem[]>([]);
+  const [followUpRows, setFollowUpRows] = useState<DailyActivityRow[]>([]);
 
   useEffect(() => {
     if (!user) {
@@ -158,6 +159,11 @@ export default function App() {
     fetchPendingItems(workDate)
       .then((result) => setPending(result.data))
       .catch(() => setPending([]));
+    fetchCurrentDailySheet(workDate)
+      .then((result) =>
+        setFollowUpRows(result.data.rows.filter((row) => row.isFollowUpGenerated || row.followUpDate === workDate)),
+      )
+      .catch(() => setFollowUpRows([]));
   }, [user]);
 
   const availableTabs = useMemo(() => {
@@ -186,6 +192,7 @@ export default function App() {
 
   const activeMeta = metaByTab(activeTab);
   const stickyPlan = dashboard?.todayPlan ?? [];
+  const stickyFollowUps = followUpRows.filter((row) => row.isFollowUpGenerated).slice(0, 4);
   const stickyPending = pending.slice(0, 4);
 
   return (
@@ -241,15 +248,25 @@ export default function App() {
             </button>
           </div>
           <div className="sticky-list">
-            {stickyPending.length ? (
-              stickyPending.map((item) => (
-                <button key={item.id} type="button" className={`sticky-chip tone-${item.status === "overdue" ? "alert" : "focus"}`} onClick={() => setActiveTab("daily")}>
-                  <strong>{item.title}</strong>
-                  <span>
-                    {item.workDate} | {item.status}
-                  </span>
-                </button>
-              ))
+            {stickyFollowUps.length || stickyPending.length ? (
+              <>
+                {stickyFollowUps.map((row) => (
+                  <button key={row.id} type="button" className="sticky-chip tone-focus" onClick={() => setActiveTab("daily")}>
+                    <strong>{row.actualActivity}</strong>
+                    <span>
+                      {row.followUpSourceDate ?? "Previous day"} | {row.followUpPerson || "Follow-up"}
+                    </span>
+                  </button>
+                ))}
+                {stickyPending.map((item) => (
+                  <button key={item.id} type="button" className={`sticky-chip tone-${item.status === "overdue" ? "alert" : "focus"}`} onClick={() => setActiveTab("daily")}>
+                    <strong>{item.title}</strong>
+                    <span>
+                      {item.workDate} | {item.status}
+                    </span>
+                  </button>
+                ))}
+              </>
             ) : (
               <div className="sticky-empty">No pending reminder right now.</div>
             )}
