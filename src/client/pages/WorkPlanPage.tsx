@@ -12,6 +12,7 @@ import {
   deleteTravelRow,
   deleteWorkPlanRow,
   fetchCurrentWorkPlan,
+  importWorkPlanWorkbook,
   submitWorkPlan,
   updateTravelRow,
   updateWorkPlan,
@@ -80,6 +81,7 @@ export function WorkPlanPage() {
   const [plan, setPlan] = useState<MonthlyWorkPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preparedDate, setPreparedDate] = useState(defaultDateForMonth(currentMonthInDhaka()));
   const [newRow, setNewRow] = useState<WorkPlanRowInput>(emptyPlanRow(defaultDateForMonth(currentMonthInDhaka())));
@@ -282,6 +284,21 @@ export function WorkPlanPage() {
     }
   }
 
+  async function handleImport(file: File | null) {
+    if (!plan || !file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const result = await importWorkPlanWorkbook(plan.id, file);
+      setPlan(result.data);
+      setPreparedDate(result.data.preparedDate);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to import work plan workbook.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   if (loading) {
     return <section className="page-card">Loading current work plan...</section>;
   }
@@ -301,6 +318,18 @@ export function WorkPlanPage() {
             </p>
           </div>
           <div className="toolbar-actions">
+            <label className="ghost-button file-label">
+              {importing ? "Importing..." : "Import Excel"}
+              <input
+                type="file"
+                accept=".xlsx"
+                disabled={importing || saving}
+                onChange={(event) => {
+                  void handleImport(event.target.files?.[0] ?? null);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
             <button type="button" className="ghost-button" onClick={savePreparedDate} disabled={saving}>
               Save header
             </button>

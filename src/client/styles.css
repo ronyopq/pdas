@@ -396,6 +396,21 @@ textarea {
   color: #14433d;
 }
 
+.file-label {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-label input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .ghost-button.danger {
   background: rgba(201, 79, 79, 0.12);
   color: #8f1f1f;

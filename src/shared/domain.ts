@@ -150,6 +150,7 @@ export interface DailyActivityRow {
   endTime: string;
   actualActivity: string;
   actualOutput: string;
+  supportingLinks: string;
   status: DailyActivityStatus;
   deliveryRequired: boolean;
   deliveryDone: boolean;
@@ -185,6 +186,7 @@ export interface DailyActivityRowInput {
   endTime: string;
   actualActivity: string;
   actualOutput: string;
+  supportingLinks: string;
   status: DailyActivityStatus;
   deliveryRequired: boolean;
   deliveryDone: boolean;

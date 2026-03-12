@@ -56,6 +56,7 @@ function emptyNewRow(): DailyActivityRowInput {
     endTime: "11:00",
     actualActivity: "",
     actualOutput: "",
+    supportingLinks: "",
     status: "in_progress",
     deliveryRequired: false,
     deliveryDone: false,
@@ -192,6 +193,7 @@ export function TodayPage() {
         endTime: row.endTime,
         actualActivity: row.actualActivity,
         actualOutput: row.actualOutput,
+        supportingLinks: row.supportingLinks,
         status: row.status,
         deliveryRequired: row.deliveryRequired,
         deliveryDone: row.deliveryDone,
@@ -435,6 +437,15 @@ export function TodayPage() {
                 </label>
 
                 <label className="stack-field">
+                  <span>Supporting links</span>
+                  <textarea
+                    value={row.supportingLinks}
+                    onChange={(event) => updateLocalRow(row.id, { supportingLinks: event.target.value })}
+                    placeholder="Paste reference links here"
+                  />
+                </label>
+
+                <label className="stack-field">
                   <span>Notes</span>
                   <textarea
                     value={row.rowNote}
@@ -608,6 +619,15 @@ export function TodayPage() {
               value={newRow.actualOutput}
               onChange={(event) => setNewRow((current) => ({ ...current, actualOutput: event.target.value }))}
               placeholder="What was the output?"
+            />
+          </label>
+
+          <label className="stack-field">
+            <span>Supporting links</span>
+            <textarea
+              value={newRow.supportingLinks}
+              onChange={(event) => setNewRow((current) => ({ ...current, supportingLinks: event.target.value }))}
+              placeholder="Paste supporting links here"
             />
           </label>
 

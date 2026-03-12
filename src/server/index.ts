@@ -105,6 +105,7 @@ interface DailyRowRecord {
   end_time: string | null;
   actual_activity: string;
   actual_output: string | null;
+  supporting_links: string | null;
   status: DailyActivityRow["status"];
   delivery_required: number;
   delivery_done: number;
@@ -443,6 +444,114 @@ function isConstraintError(error: unknown, constraintType: "UNIQUE" | "FOREIGN K
 function isAllowedOfficeAttachment(fileName: string) {
   const lowerName = fileName.toLowerCase();
   return lowerName.endsWith(".docx") || lowerName.endsWith(".xlsx");
+}
+
+function parseWorkbookMonthLabel(rawValue: string | number | null | undefined) {
+  if (!rawValue) return null;
+  const text = String(rawValue).trim();
+  const parsed = new Date(text.replace(",", ""));
+  if (Number.isNaN(parsed.getTime())) return null;
+  return {
+    month: parsed.getMonth() + 1,
+    year: parsed.getFullYear(),
+  };
+}
+
+function normalizeWorkbookDate(rawValue: string | number | null | undefined) {
+  if (rawValue == null || rawValue === "") return null;
+
+  if (typeof rawValue === "number") {
+    const parsed = XLSX.SSF.parse_date_code(rawValue);
+    if (!parsed) return null;
+    return `${String(parsed.y).padStart(4, "0")}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+  }
+
+  const normalized = String(rawValue).trim().replace(",", "");
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function inferImportedRowType(activity: string): WorkPlanRow["rowType"] {
+  const normalized = activity.trim().toLowerCase();
+  if (!normalized || normalized === "—" || normalized === "-") return "reserved";
+  if (normalized.includes("friday") || normalized.includes("weekend")) return "weekend";
+  if (normalized.includes("leave")) return "leave";
+  if (normalized.includes("holiday")) return "holiday";
+  if (normalized.includes("meeting")) return "meeting";
+  if (normalized.includes("visit")) return "field_visit";
+  if (normalized.includes("travel")) return "travel";
+  return "regular_work";
+}
+
+function importedRowStatus(rowType: WorkPlanRow["rowType"]): WorkPlanRow["rowStatus"] {
+  if (rowType === "holiday") return "planned";
+  if (rowType === "weekend") return "planned";
+  if (rowType === "leave") return "planned";
+  return "planned";
+}
+
+function parseWorkPlanWorkbook(fileBytes: Uint8Array) {
+  const workbook = XLSX.read(fileBytes, { type: "array" });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error("Workbook does not contain any sheet.");
+  }
+
+  const sheet = workbook.Sheets[firstSheetName];
+  const rows = XLSX.utils.sheet_to_json<(string | number | null)[]>(sheet, {
+    header: 1,
+    raw: true,
+    blankrows: false,
+  });
+
+  const headerRowIndex = rows.findIndex(
+    (row) =>
+      Array.isArray(row) &&
+      String(row[0] ?? "").trim().toLowerCase() === "sl." &&
+      String(row[1] ?? "").trim().toLowerCase() === "date",
+  );
+
+  if (headerRowIndex === -1) {
+    throw new Error("Could not find the work plan table in the uploaded workbook.");
+  }
+
+  const monthMeta = parseWorkbookMonthLabel(rows[2]?.[2]);
+  const preparedDate = normalizeWorkbookDate(rows[2]?.[4] ?? null);
+  const importedRows: WorkPlanRowInput[] = [];
+
+  for (const row of rows.slice(headerRowIndex + 1)) {
+    if (!Array.isArray(row)) continue;
+    const serialText = String(row[0] ?? "").trim();
+    const dateValue = normalizeWorkbookDate(row[1] ?? null);
+    const activity = String(row[2] ?? "").trim();
+    const expectedOutput = String(row[4] ?? "").trim();
+
+    if (!serialText && !dateValue && !activity && !expectedOutput) {
+      continue;
+    }
+
+    if (!dateValue) {
+      continue;
+    }
+
+    importedRows.push({
+      workDate: dateValue,
+      activity,
+      expectedOutput,
+      rowType: inferImportedRowType(activity),
+    });
+  }
+
+  if (!importedRows.length) {
+    throw new Error("No work plan rows were found in the workbook.");
+  }
+
+  return {
+    preparedDate,
+    monthMeta,
+    rows: importedRows,
+  };
 }
 
 function navByRole(role: UserRole): NavigationItem[] {
@@ -985,6 +1094,7 @@ async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityR
         dar.end_time,
         dar.actual_activity,
         dar.actual_output,
+        dar.supporting_links,
         dar.status,
         dar.delivery_required,
         dar.delivery_done,
@@ -1052,6 +1162,7 @@ async function fetchDailyRows(env: Env, sheetId: string): Promise<DailyActivityR
     endTime: row.end_time ?? "",
     actualActivity: row.actual_activity,
     actualOutput: row.actual_output ?? "",
+    supportingLinks: row.supporting_links ?? "",
     status: row.status,
     deliveryRequired: row.delivery_required === 1,
     deliveryDone: row.delivery_done === 1,
@@ -1136,6 +1247,7 @@ async function materializeDueFollowUps(env: Env, user: UserSession, sheet: Daily
             end_time,
             actual_activity,
             actual_output,
+            supporting_links,
             status,
             delivery_required,
             delivery_done,
@@ -1875,8 +1987,14 @@ function renderDailyRowsPrint(rows: DailyActivityRow[]) {
           (row) => `
             <tr>
               <td>${escapeHtml(`${row.startTime} - ${row.endTime}`)}</td>
-              <td>${escapeHtml(row.linkLabel ?? row.actualActivity)}</td>
-              <td>${escapeHtml(row.actualOutput)}</td>
+              <td>
+                ${escapeHtml(row.linkLabel ?? row.actualActivity)}
+                ${row.supportingLinks ? `<div><small>Links: ${escapeHtml(row.supportingLinks)}</small></div>` : ""}
+              </td>
+              <td>
+                ${escapeHtml(row.actualOutput)}
+                ${row.followUpDate ? `<div><small>Follow-up: ${escapeHtml(row.followUpDate)}</small></div>` : ""}
+              </td>
               <td>${row.deliveryDone ? "Done" : row.deliveryRequired ? "Pending" : ""}</td>
             </tr>
           `,
@@ -2207,7 +2325,9 @@ async function exportDailySheetPdf(sheet: DailySheet, user: UserSession) {
   y -= 4;
   draw("Time | Task | Output | Delivery", bold, 11);
   sheet.rows.forEach((row) => {
-    const line = `${row.startTime}-${row.endTime} | ${row.linkLabel ?? row.actualActivity} | ${row.actualOutput} | ${
+    const line = `${row.startTime}-${row.endTime} | ${row.linkLabel ?? row.actualActivity} | ${row.actualOutput}${
+      row.supportingLinks ? ` | Links: ${row.supportingLinks}` : ""
+    } | ${
       row.deliveryDone ? "Done" : row.deliveryRequired ? "Pending" : "-"
     }`;
     wrapText(line, 84).forEach((part) => draw(part));
@@ -2661,6 +2781,92 @@ export default {
         .run();
 
       return json(await hydratePlan(env, { ...plan, prepared_date: body.preparedDate ?? plan.prepared_date }, user));
+    }
+
+    const planImportMatch = matchRoute(url.pathname, /^\/api\/work-plans\/([^/]+)\/import$/);
+    if (planImportMatch && request.method === "POST") {
+      const planId = planImportMatch[1];
+      const plan = await findPlanRecordById(env, planId, user.id);
+      if (!plan) return error("Work plan not found.", 404);
+
+      if (!(plan.status === "draft" || plan.status === "revision_requested")) {
+        return error("Only draft or revision-requested work plans can be replaced by import.", 400);
+      }
+
+      const linkedDailyCount = await env.DB.prepare(
+        `
+          SELECT COUNT(*) AS linked_count
+          FROM daily_activity_rows dar
+          JOIN monthly_work_plan_rows mpr ON mpr.id = dar.linked_plan_row_id
+          WHERE mpr.work_plan_id = ?
+        `,
+      )
+        .bind(planId)
+        .first<{ linked_count: number }>();
+
+      if ((linkedDailyCount?.linked_count ?? 0) > 0) {
+        return error("This work plan already has linked daily activity. Import is blocked to protect existing records.", 400);
+      }
+
+      const formData = await request.formData();
+      const uploaded = formData.get("file");
+      if (!(uploaded instanceof File)) {
+        return error("Upload a .xlsx work plan file.", 400);
+      }
+
+      if (!uploaded.name.toLowerCase().endsWith(".xlsx")) {
+        return error("Only .xlsx files are supported for work plan import.", 400);
+      }
+
+      const imported = parseWorkPlanWorkbook(new Uint8Array(await uploaded.arrayBuffer()));
+      if (imported.monthMeta && (imported.monthMeta.month !== plan.month || imported.monthMeta.year !== plan.year)) {
+        return error("Uploaded workbook month does not match the selected work plan month.", 400);
+      }
+
+      const statements: D1PreparedStatement[] = [
+        env.DB.prepare(
+          `
+            DELETE FROM monthly_work_plan_rows
+            WHERE work_plan_id = ?
+          `,
+        ).bind(planId),
+      ];
+
+      imported.rows.forEach((row, index) => {
+        statements.push(
+          env.DB.prepare(
+            `
+              INSERT INTO monthly_work_plan_rows (
+                id, work_plan_id, serial_no, work_date, row_type, planned_activity, expected_output, row_status
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+          ).bind(
+            crypto.randomUUID(),
+            planId,
+            index + 1,
+            row.workDate,
+            row.rowType,
+            row.activity,
+            row.expectedOutput,
+            importedRowStatus(row.rowType),
+          ),
+        );
+      });
+
+      statements.push(
+        env.DB.prepare(
+          `
+            UPDATE monthly_work_plans
+            SET prepared_date = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `,
+        ).bind(imported.preparedDate ?? plan.prepared_date, planId),
+      );
+
+      await env.DB.batch(statements);
+      const refreshed = await findPlanRecordById(env, planId, user.id);
+      if (!refreshed) return error("Unable to load imported work plan.", 500);
+      return json(await hydratePlan(env, refreshed, user));
     }
 
     const rowCreateMatch = matchRoute(url.pathname, /^\/api\/work-plans\/([^/]+)\/rows$/);
@@ -3153,6 +3359,7 @@ export default {
             end_time,
             actual_activity,
             actual_output,
+            supporting_links,
             status,
             delivery_required,
             delivery_done,
@@ -3166,7 +3373,7 @@ export default {
             follow_up_generated_row_id,
             follow_up_source_row_id,
             is_follow_up_generated
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
         `,
       )
         .bind(
@@ -3179,6 +3386,7 @@ export default {
           body.endTime,
           body.actualActivity,
           body.actualOutput,
+          body.supportingLinks,
           body.status,
           body.deliveryRequired ? 1 : 0,
           body.deliveryDone ? 1 : 0,
@@ -3249,6 +3457,7 @@ export default {
             end_time = ?,
             actual_activity = ?,
             actual_output = ?,
+            supporting_links = ?,
             status = ?,
             delivery_required = ?,
             delivery_done = ?,
@@ -3270,6 +3479,7 @@ export default {
           body.endTime,
           body.actualActivity,
           body.actualOutput,
+          body.supportingLinks,
           body.status,
           body.deliveryRequired ? 1 : 0,
           body.deliveryDone ? 1 : 0,

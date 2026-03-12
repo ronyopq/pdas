@@ -167,6 +167,16 @@ export function submitWorkPlan(planId: string) {
   });
 }
 
+export function importWorkPlanWorkbook(planId: string, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return requestFormData<MonthlyWorkPlan>(`/api/work-plans/${planId}/import`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export function fetchCurrentDailySheet(workDate: string) {
   return requestJson<DailySheet>(`/api/daily-sheets/current?date=${workDate}`);
 }
